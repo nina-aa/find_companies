@@ -9,6 +9,7 @@ lessons.md
 
 # --- build artefacts ---
 data/index/
+data/cache/
 *.db
 *.db-wal
 *.db-shm

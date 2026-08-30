@@ -36,6 +36,23 @@ def _load_yaml(name: str) -> dict:
         return yaml.safe_load(fh)
 
 
+def load_env(path: Path | None = None) -> None:
+    """Minimal ``.env`` loader (no dependency). ``KEY=value`` lines, ``#`` comments;
+    never overrides a variable already set in the real environment."""
+    import os
+
+    path = path or (REPO_ROOT / ".env")
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
 @lru_cache(maxsize=1)
 def schema_map() -> dict:
     return _load_yaml("schema_map.yaml")

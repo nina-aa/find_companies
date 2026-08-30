@@ -66,6 +66,62 @@ def _cmd_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    """interpret_mandate -> build_search_plan -> check_feasibility (1 LLM call)."""
+    from app import config
+    from app.llm import build_client
+    from app.nodes import NodeDeps, build_search_plan, check_feasibility, interpret_mandate
+    from app.state import RunConfig, RunState
+
+    config.load_env()
+    cfg = RunConfig(provider=args.provider, use_cache=not args.no_cache)
+    client = build_client(cfg.provider, model=cfg.model, use_cache=cfg.use_cache)
+    deps = NodeDeps(llm=client, db_path=args.db)
+
+    state = RunState(query=args.mandate, cfg=cfg)
+    state = interpret_mandate(state, deps)
+    state = build_search_plan(state, deps)
+    state = check_feasibility(state, deps)
+
+    if args.json:
+        print(json.dumps({
+            "run_id": state.run_id,
+            "interpreted_mandate": state.criteria.model_dump(),
+            "search_plan": state.plan.model_dump(),
+            "feasibility": state.feasibility.model_dump(),
+            "trace": state.trace.model_dump(),
+        }, indent=2, default=str))
+        return 0
+
+    c, p, f = state.criteria, state.plan, state.feasibility
+    print(f"run {state.run_id}  provider={cfg.provider}\n")
+    print("INTERPRETED MANDATE")
+    print("  mandatory  :", c.mandatory.model_dump(exclude_defaults=True) or "{}")
+    print("  preferences:", c.preferences.model_dump(exclude_defaults=True) or "{}")
+    print("  exclusions :", c.exclusions.model_dump(exclude_defaults=True) or "{}")
+    print("  semantic   :", repr(c.semantic_focus))
+    if c.ambiguities:
+        for a in c.ambiguities:
+            print("  ambiguity  :", a)
+    print("\nSEARCH PLAN")
+    where, params = p.filters.to_sql()
+    print("  SQL WHERE  :", where, "  params:", params)
+    print("  topic_terms:", p.topic_terms, f"(mode={p.topic_mode})")
+    print("  exclusions :", p.exclusions.model_dump(exclude_defaults=True) or "{}")
+    if p.notes:
+        for n in p.notes:
+            print("  note       :", n)
+    print("\nFEASIBILITY")
+    print(f"  {f.matched} companies match the mandatory filters -> "
+          f"{'feasible' if f.feasible else 'INFEASIBLE'}")
+    if not f.feasible:
+        print("  reason:", f.reason)
+    t = state.trace
+    print(f"\ntokens: {t.prompt_tokens}+{t.completion_tokens}  "
+          f"est_cost=${t.est_cost_usd:.5f}  llm_calls={t.llm_calls}  repairs={t.repairs}")
+    return 0
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     from app.revenue import RevenueRange
     from app.schemas import Exclusions, StructuredFilters
@@ -144,6 +200,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_s.add_argument("--json", action="store_true")
     p_s.add_argument("--db", default=ingest_mod.DEFAULT_DB)
     p_s.set_defaults(func=_cmd_search)
+
+    p_c = sub.add_parser("check", help="interpret + plan + feasibility only (1 LLM call)")
+    p_c.add_argument("mandate", help="the natural-language mandate")
+    p_c.add_argument("--provider", choices=["fake", "openai"], default="fake")
+    p_c.add_argument("--no-cache", action="store_true", help="bypass the response cache")
+    p_c.add_argument("--json", action="store_true")
+    p_c.add_argument("--db", default=ingest_mod.DEFAULT_DB)
+    p_c.set_defaults(func=_cmd_check)
 
     return parser
 

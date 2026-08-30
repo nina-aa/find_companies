@@ -3,8 +3,9 @@
 Natural-language company mandate → ranked, evidence-backed shortlist over a
 50,000-row synthetic dataset. Built for the Comparables.ai technical assessment.
 
-> **Status:** M1 (data foundation) complete. Milestones M2–M5 in progress — see
-> `PLAN.md` (not committed) for the full roadmap.
+> **Status:** M1–M3 complete (data foundation, retrieval tools, LLM layer + all 7
+> workflow nodes). M4 (bounded runner + CLI `run` + HTTP API) and M5 (eval + deploy)
+> in progress — see `PLAN.md` (not committed) for the full roadmap.
 
 ---
 
@@ -19,8 +20,14 @@ python -m app.cli ingest
 # Sanity-check it with raw SQL.
 python -m app.cli db "SELECT industry, COUNT(*) FROM companies GROUP BY industry"
 
+# Interpret a mandate + build the plan + feasibility check (needs an OpenAI key).
+python -m app.cli check "German drug-discovery companies, preferably founded after 2018" --provider openai
+
 # Run the test suite (offline, no API tokens).
 python -m pytest
+
+# Opt-in live smoke test (one real gpt-4o-mini call, < $0.001):
+RUN_LIVE=1 python -m pytest tests/test_live_smoke.py -q -s
 ```
 
 The index is written to `data/index/companies.db` (+ `manifest.json`) and is not
@@ -55,6 +62,10 @@ grounding checks — is deterministic and testable without the API.
 | `app/db.py` | Read-only SQLite connection + manifest loader. |
 | `app/schemas.py` | Pydantic tool contracts: `StructuredFilters`, `Exclusions`, `Candidate`, `Company`, `SearchResult`. |
 | `app/tools.py` | `search_companies` / `count_matching` / `get_by_ids` — deterministic, 0 tokens. |
+| `app/llm.py` | `LLMClient` + `OpenAIProvider` / `FakeProvider`, response cache, cost table. |
+| `app/state.py` | Mandate / plan / validation schemas, `RunState`, `RunTrace`, `AgentResponse`. |
+| `app/prompts.py` | Prompt builders for the two LLM calls (pure functions). |
+| `app/nodes.py` | The 7 workflow nodes as `RunState → RunState` functions. |
 | `app/revenue.py` | `revenue_range` bucket ↔ euro-interval parsing. |
 | `app/config.py` | Loads `schema_map.yaml` / `regions.yaml` / `lexicon.yaml`; region + industry resolution. |
 | `app/cli.py` | Command-line entry point (the primary test surface). |
@@ -138,6 +149,36 @@ and costs **zero tokens** — they are plain SQL.
 `Exclusions`. There is no parameter through which a *preference* (founded-year,
 headcount band) could become a hard filter — preferences are applied later as
 ranking boosts in `validate_and_rank`. Enforced by the type, not by convention.
+
+### D8 — One `LLMClient` seam; fake provider is the test default
+Every model call goes through `LLMClient.complete(messages, response_model)`
+([app/llm.py](app/llm.py)). `OpenAIProvider` uses `chat.completions.parse` with a
+Pydantic model as strict `response_format`; `FakeProvider` returns schema-valid
+dummies (`fabricate`) so the whole test suite runs offline at $0. One repair
+retry on a schema-validation failure, then a structured `LLMError`; a 429 gets
+one `Retry-After` backoff then fails gracefully. The response cache mixes the
+provider identity (`fake` vs `openai:gpt-4o-mini`) into every key, so a fake
+answer is never served for a real call.
+
+### D9 — Few-shot the mandatory/preference split
+gpt-4o-mini, given rules alone, repeatedly classified "preferably founded after
+2018" as a *mandatory* filter and emitted `0` for unspecified numeric bounds.
+Two worked examples (built from the real Pydantic models, so every field + null
+is shown) fixed both. Verified with the live smoke test. The alternative —
+escalating interpret to `gpt-4o` — was rejected: 16× the cost for a nuance a
+demonstration handles.
+
+### D10 — Groundedness is a deterministic check, not a prompt instruction
+`validate_and_rank` asks the model for a `quote` per text judgement, then
+[app/nodes.py](app/nodes.py) verifies each quote is a literal substring of the
+named field of the *real* record ([get_by_ids]). A quote that fails is demoted
+from `evidence` to `inference`. A cited quote is an LLM claim until checked.
+
+### D11 — Revision is deterministic and bounded
+`relax_preferences` is a fixed ladder (widen founding-year → drop it → drop the
+employee band → enlarge the pool), never an LLM call — Q4 specifies the rule
+itself. Mandatory criteria and exclusions are never touched; at most one revision
+per run.
 
 ---
 

@@ -1,0 +1,315 @@
+"""Workflow data models: the mandate, the search plan, per-run state, the
+validation schemas, and the final response.
+
+Two kinds of model live here:
+
+* **LLM response schemas** — ``MandateCriteria`` (interpret) and ``ValidationBatch``
+  (validate). Narrow, purpose-built, no open ``dict`` fields, safe for OpenAI
+  strict ``response_format``. ``ValidationBatch`` deliberately carries *no* company
+  fields — those are hydrated from the DB afterwards (lesson 3 / lesson 9).
+* **Internal state / transport** — everything else. Never sent to the model.
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas import Candidate, Company, Exclusions, SearchResult, StructuredFilters
+from app.revenue import RevenueRange
+
+Verdict = Literal["match", "partial", "no"]
+
+
+# ==========================================================================
+# interpret_mandate  —  LLM call #1 schema
+# ==========================================================================
+class MandateConstraints(BaseModel):
+    """One side of the mandate (mandatory OR preferences), same shape for both."""
+
+    countries: list[str] = Field(default_factory=list)
+    regions: list[str] = Field(default_factory=list)
+    industries: list[str] = Field(default_factory=list)
+    founded_year_gte: int | None = None
+    founded_year_lte: int | None = None
+    employee_count_gte: int | None = None
+    employee_count_lte: int | None = None
+    revenue_eur_gte: int | None = None
+    revenue_eur_lte: int | None = None
+    capabilities_any: list[str] = Field(default_factory=list)
+    capabilities_all: list[str] = Field(default_factory=list)
+    serves: list[str] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return self.model_dump(exclude_defaults=True) == {}
+
+
+class MandateExclusions(BaseModel):
+    categories: list[str] = Field(default_factory=list)   # semantic, for the validator
+    keywords: list[str] = Field(default_factory=list)     # deterministic substring gate
+    industries: list[str] = Field(default_factory=list)   # structured NOT IN
+
+
+class MandateCriteria(BaseModel):
+    """Structured form of the natural-language mandate (interpret_mandate output)."""
+
+    mandatory: MandateConstraints = Field(default_factory=MandateConstraints)
+    preferences: MandateConstraints = Field(default_factory=MandateConstraints)
+    exclusions: MandateExclusions = Field(default_factory=MandateExclusions)
+    semantic_focus: str = ""
+    ambiguities: list[str] = Field(default_factory=list)
+
+
+# ==========================================================================
+# build_search_plan  —  DETERMINISTIC
+# ==========================================================================
+class RevisionStep(BaseModel):
+    action: Literal[
+        "widen_founded_year", "drop_founded_year_pref",
+        "drop_employee_pref", "raise_limit",
+    ]
+    detail: str = ""
+
+
+class RevisionPolicy(BaseModel):
+    min_results: int = 3
+    steps: list[RevisionStep] = Field(default_factory=list)
+    max_revisions: int = 1
+
+
+class SearchPlan(BaseModel):
+    filters: StructuredFilters = Field(default_factory=StructuredFilters)
+    topic_terms: list[str] = Field(default_factory=list)
+    topic_mode: Literal["any", "all"] = "any"
+    semantic_query: str | None = None
+    exclusions: Exclusions = Field(default_factory=Exclusions)
+    preferences: MandateConstraints = Field(default_factory=MandateConstraints)
+    serves: list[str] = Field(default_factory=list)
+    revision_policy: RevisionPolicy = Field(default_factory=RevisionPolicy)
+    tool_sequence: list[str] = Field(default_factory=lambda: ["search_companies", "get_by_ids"])
+    notes: list[str] = Field(default_factory=list)   # deterministic adjustments made
+
+
+# ==========================================================================
+# check_feasibility  —  DETERMINISTIC
+# ==========================================================================
+class FeasibilityResult(BaseModel):
+    feasible: bool
+    matched: int
+    reason: str = ""
+
+
+# ==========================================================================
+# validate_and_rank  —  LLM call #2/#3 schema  (NO company fields)
+# ==========================================================================
+class MandatoryCheck(BaseModel):
+    requirement: str
+    met: bool
+    source_field: str = ""   # "" when the judgement is not text-grounded
+    quote: str = ""          # must be a literal substring of source_field (checked later)
+    inference: str = ""      # reasoning when there is no direct quote
+
+
+class PreferenceSignal(BaseModel):
+    preference: str
+    matched: bool
+    note: str = ""
+
+
+class CandidateJudgement(BaseModel):
+    candidate_id: int
+    verdict: Verdict
+    mandatory_checks: list[MandatoryCheck] = Field(default_factory=list)
+    preference_signals: list[PreferenceSignal] = Field(default_factory=list)
+    relevance_score: float = 0.0
+    rationale: str = ""
+
+
+class ValidationBatch(BaseModel):
+    judgements: list[CandidateJudgement] = Field(default_factory=list)
+
+
+# ==========================================================================
+# post-validation internal + final response
+# ==========================================================================
+class Evidence(BaseModel):
+    requirement: str
+    source_field: str
+    quote: str
+
+
+class Inference(BaseModel):
+    claim: str
+    basis: str
+
+
+class RankedCompany(BaseModel):
+    company: Company
+    verdict: Verdict
+    relevance_score: float
+    mandatory_met: int = 0
+    evidence: list[Evidence] = Field(default_factory=list)
+    inferences: list[Inference] = Field(default_factory=list)
+    unmet_preferences: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class RevisionRecord(BaseModel):
+    performed: bool = False
+    relaxed: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class ToolCall(BaseModel):
+    name: str
+    ok: bool
+    result_count: int = 0
+    detail: str = ""
+
+
+class StageRecord(BaseModel):
+    stage: str
+    ok: bool = True
+    note: str = ""
+    llm_calls: int = 0
+
+
+class RunTrace(BaseModel):
+    run_id: str
+    stages: list[StageRecord] = Field(default_factory=list)
+    tools: list[ToolCall] = Field(default_factory=list)
+    llm_calls: int = 0
+    llm_attempts: int = 0
+    cache_hits: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    est_cost_usd: float = 0.0
+    repairs: int = 0
+
+    def add_stage(self, stage: str, *, ok: bool = True, note: str = "", llm_calls: int = 0):
+        self.stages.append(StageRecord(stage=stage, ok=ok, note=note, llm_calls=llm_calls))
+
+    def add_tool(self, name: str, *, ok: bool, result_count: int = 0, detail: str = ""):
+        self.tools.append(ToolCall(name=name, ok=ok, result_count=result_count, detail=detail))
+
+    def record_llm(self, result) -> None:
+        self.llm_calls += 1
+        self.llm_attempts += getattr(result, "attempts", 1)
+        if getattr(result, "cached", False):
+            self.cache_hits += 1
+        if getattr(result, "repaired", False):
+            self.repairs += 1
+        u = result.usage
+        self.prompt_tokens += u.prompt_tokens
+        self.completion_tokens += u.completion_tokens
+        self.est_cost_usd = round(self.est_cost_usd + u.est_cost_usd, 6)
+
+
+class BudgetState(BaseModel):
+    max_llm_calls: int = 5
+    max_iterations: int = 2
+    max_revisions: int = 1
+    max_pool: int = 100
+    max_validation_batch: int = 10
+    max_results: int = 10
+    llm_calls: int = 0
+    iterations: int = 0
+    revisions: int = 0
+
+
+class ResponseMetadata(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    stages_executed: list[str] = Field(default_factory=list)
+    tools_called: list[ToolCall] = Field(default_factory=list)
+    candidates_retrieved_per_iteration: list[int] = Field(default_factory=list)
+    candidates_validated: int = 0
+    validation_outcome: dict = Field(default_factory=dict)
+    revised_search_performed: bool = False
+    llm_calls: int = 0
+    llm_attempts: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    est_cost_usd: float = 0.0
+    latency_ms: int = 0
+    model: str = ""
+    provider: str = ""
+    timed_out: bool = False
+
+
+class ResultItem(BaseModel):
+    rank: int
+    company_id: int
+    name: str
+    industry: str | None
+    location: str | None
+    founded_year: int | None
+    employee_count: int | None
+    revenue_range: str | None
+    verdict: Verdict
+    relevance_score: float
+    evidence: list[Evidence] = Field(default_factory=list)
+    inferences: list[Inference] = Field(default_factory=list)
+    unmet_preferences: list[str] = Field(default_factory=list)
+
+
+class AgentResponse(BaseModel):
+    run_id: str
+    query: str
+    interpreted_mandate: MandateCriteria
+    search_plan: SearchPlan
+    results: list[ResultItem] = Field(default_factory=list)
+    revision: RevisionRecord = Field(default_factory=RevisionRecord)
+    empty_reason: str = ""
+    metadata: ResponseMetadata = Field(default_factory=ResponseMetadata)
+
+
+# ==========================================================================
+# RunState — the object every node takes and returns
+# ==========================================================================
+class RunConfig(BaseModel):
+    provider: Literal["openai", "fake"] = "fake"
+    model: str = "gpt-4o-mini"
+    use_cache: bool = True
+    min_results: int = 3
+    deadline_s: float = 90.0
+    enable_embeddings: bool = False
+    validation_batch: int = 10
+    result_limit: int = 10
+    pool_limit: int = 100
+
+
+class RunState(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    run_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    query: str = ""
+    cfg: RunConfig = Field(default_factory=RunConfig)
+    started_ts: float = Field(default_factory=time.monotonic)
+    deadline_ts: float | None = None
+
+    criteria: MandateCriteria | None = None
+    plan: SearchPlan | None = None
+    feasibility: FeasibilityResult | None = None
+
+    pool: list[Candidate] = Field(default_factory=list)
+    last_search: SearchResult | None = None
+    iteration: int = 0
+    retrieved_per_iteration: list[int] = Field(default_factory=list)
+
+    judgements: list[CandidateJudgement] = Field(default_factory=list)
+    ranked: list[RankedCompany] = Field(default_factory=list)
+    results: list[RankedCompany] = Field(default_factory=list)
+
+    revision: RevisionRecord = Field(default_factory=RevisionRecord)
+    budget: BudgetState = Field(default_factory=BudgetState)
+    trace: RunTrace | None = None
+    response: AgentResponse | None = None
+
+    def ensure_trace(self) -> RunTrace:
+        if self.trace is None:
+            self.trace = RunTrace(run_id=self.run_id)
+        return self.trace

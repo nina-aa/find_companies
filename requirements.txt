@@ -1,9 +1,9 @@
 # Runtime
 PyYAML>=6.0
 pydantic>=2.7          # tool contracts (M2), LLM response schemas (M3)
+openai>=1.40           # LLM client (M3); only used when --provider openai
 
 # --- added in later milestones ---
-# openai>=1.40         (M3 — LLM client)
 # structlog>=24.1      (M4 — observability)
 # fastapi>=0.111       (M4 — HTTP API)
 # uvicorn>=0.30        (M4 — HTTP API)
