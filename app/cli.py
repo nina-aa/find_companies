@@ -122,6 +122,140 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    from app import config
+    from app.state import RunConfig
+    from app.workflow import run_workflow
+
+    import os
+    config.load_env()
+    os.environ.setdefault("LOG_LEVEL", "INFO" if args.verbose else "WARNING")
+
+    cfg = RunConfig(
+        provider="fake" if args.fake else args.provider,
+        use_cache=not args.no_cache,
+        min_results=args.min_results,
+        deadline_s=args.deadline_s,
+        engine=args.engine,
+    )
+    response, state = run_workflow(args.mandate, cfg, db_path=args.db)
+
+    if args.json:
+        print(response.model_dump_json(indent=2))
+        return 0
+    if args.trace:
+        print(state.trace.model_dump_json(indent=2))
+        return 0
+
+    _print_run(response, state, explain=args.explain, verbose=args.verbose)
+    return 0
+
+
+def _print_run(response, state, *, explain: bool, verbose: bool) -> None:
+    m = response.metadata
+    print(f"run {response.run_id}  provider={m.provider}  engine={state.cfg.engine}")
+    c = response.interpreted_mandate
+    print("\nMANDATE")
+    print("  mandatory  :", c.mandatory.model_dump(exclude_defaults=True) or "{}")
+    print("  preferences:", c.preferences.model_dump(exclude_defaults=True) or "{}")
+    if c.exclusions.model_dump(exclude_defaults=True):
+        print("  exclusions :", c.exclusions.model_dump(exclude_defaults=True))
+    for a in c.ambiguities:
+        print("  ambiguity  :", a)
+
+    p = response.search_plan
+    where, params = p.filters.to_sql()
+    print("\nPLAN")
+    print("  WHERE      :", where, " params:", params)
+    print("  topics     :", p.topic_terms, f"(mode={p.topic_mode})")
+    for n in p.notes:
+        print("  note       :", n)
+
+    if verbose:
+        print("\nSTAGES")
+        for s in state.trace.stages:
+            flag = "ok" if s.ok else "FAIL"
+            print(f"  [{flag}] {s.stage}" + (f" — {s.note}" if s.note else ""))
+        for t in state.trace.tools:
+            print(f"  tool {t.name}: ok={t.ok} count={t.result_count} {t.detail}")
+
+    fn = m.funnel
+    print("\nFUNNEL")
+    for label, n in (
+        ("mandatory filters", fn.mandatory_filters),
+        ("+ topic match", fn.topic_match),
+        ("- exclusions", fn.after_exclusions),
+        ("retrieved pool (cap 100)", fn.retrieved_pool),
+        ("sent to validation (cap 10)", fn.sent_to_validation),
+        ("passed validation", fn.passed_validation),
+        ("returned", fn.returned),
+    ):
+        print(f"  {label:<30} {n}")
+
+    if response.revision.performed:
+        print("\nREVISION")
+        print("  reason :", response.revision.reason)
+        for r in response.revision.relaxed:
+            print("  relaxed:", r)
+
+    print(f"\nRESULTS ({len(response.results)})")
+    if response.empty_reason:
+        print("  (empty)", response.empty_reason)
+    for item in response.results:
+        pset = "" if not item.unmet_preferences else f" −{len(item.unmet_preferences)}pref"
+        print(f"  #{item.rank} {item.name}  [{item.verdict} rel={item.relevance_score:.2f}"
+              f"{pset}]  {item.location}/{item.industry}  founded={item.founded_year} "
+              f"emp={item.employee_count}")
+        if explain:
+            for e in item.evidence:
+                print(f"      evidence  ({e.source_field}): \"{e.quote}\"  <- {e.requirement}")
+            for inf in item.inferences:
+                print(f"      inference : {inf.claim}  ({inf.basis})")
+            for u in item.unmet_preferences:
+                print(f"      unmet pref: {u}")
+
+    vo = m.validation_outcome
+    print(f"\n{m.candidates_validated} validated -> "
+          f"{vo.get('matched', 0)} match / {vo.get('partial', 0)} partial / "
+          f"{vo.get('rejected', 0)} rejected")
+    print(f"llm_calls={m.llm_calls} (attempts={m.llm_attempts}, cache_hits={m.cache_hits}, "
+          f"repairs={state.trace.repairs})  tokens={m.prompt_tokens}+{m.completion_tokens}  "
+          f"est_cost=${m.est_cost_usd:.5f}  latency={m.latency_ms}ms")
+    if m.stop_reason:
+        print(f"stop_reason={m.stop_reason}  timed_out={m.timed_out}")
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    import os
+    from app import config
+    from app.evaluate import RESULTS_PATH, QUERIES_PATH, render_report, run_eval
+    from app.state import RunConfig
+
+    config.load_env()
+    os.environ.setdefault("LOG_LEVEL", "WARNING")
+    cfg = RunConfig(provider="fake" if args.fake else args.provider,
+                    use_cache=not args.no_cache)
+    results = run_eval(
+        query_ids=args.id or None,
+        cfg=cfg,
+        queries_path=args.queries or QUERIES_PATH,
+        db_path=args.db,
+    )
+    report = render_report(results)
+    out = args.out or RESULTS_PATH
+    __import__("pathlib").Path(out).write_text(report, encoding="utf-8")
+
+    for r in results:
+        verdict = "PASS" if r.ok else "FAIL"
+        fails = "" if r.ok else "  <- " + "; ".join(c.name for c in r.checks if not c.passed)
+        print(f"  {r.qid:4} {verdict:4}  retrieved={r.n_retrieved:<4} returned={r.n_returned:<3} "
+              f"revised={'y' if r.revised else 'n'} llm={r.llm_calls} "
+              f"${r.est_cost_usd:.5f} {r.latency_ms}ms{fails}")
+    n_ok = sum(r.ok for r in results)
+    print(f"\n{n_ok}/{len(results)} fully green — wrote {out}")
+    return 0 if n_ok == len(results) else 1
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     from app.revenue import RevenueRange
     from app.schemas import Exclusions, StructuredFilters
@@ -208,6 +342,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_c.add_argument("--json", action="store_true")
     p_c.add_argument("--db", default=ingest_mod.DEFAULT_DB)
     p_c.set_defaults(func=_cmd_check)
+
+    p_r = sub.add_parser("run", help="run the full workflow on a mandate")
+    p_r.add_argument("mandate", help="the natural-language mandate")
+    p_r.add_argument("--provider", choices=["fake", "openai"], default="openai")
+    p_r.add_argument("--fake", action="store_true", help="shorthand for --provider fake")
+    p_r.add_argument("--engine", choices=["driver", "graph"], default="driver")
+    p_r.add_argument("--verbose", action="store_true", help="stream every stage + tool call")
+    p_r.add_argument("--explain", action="store_true", help="show evidence/inference per result")
+    p_r.add_argument("--json", action="store_true", help="raw AgentResponse JSON")
+    p_r.add_argument("--trace", action="store_true", help="full RunTrace JSON")
+    p_r.add_argument("--no-cache", action="store_true")
+    p_r.add_argument("--min-results", type=int, default=3, help="revision trigger threshold")
+    p_r.add_argument("--deadline-s", type=float, default=90.0)
+    p_r.add_argument("--db", default=ingest_mod.DEFAULT_DB)
+    p_r.set_defaults(func=_cmd_run)
+
+    p_e = sub.add_parser("eval", help="run the eval query set -> report table + RESULTS.md")
+    p_e.add_argument("--id", action="append", default=[], help="run only these query ids")
+    p_e.add_argument("--provider", choices=["fake", "openai"], default="openai")
+    p_e.add_argument("--fake", action="store_true")
+    p_e.add_argument("--no-cache", action="store_true")
+    p_e.add_argument("--queries", default=None, help="path to queries.yaml")
+    p_e.add_argument("--out", default=None, help="path to write RESULTS.md")
+    p_e.add_argument("--db", default=ingest_mod.DEFAULT_DB)
+    p_e.set_defaults(func=_cmd_eval)
 
     return parser
 

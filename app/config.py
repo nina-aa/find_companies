@@ -49,8 +49,14 @@ def load_env(path: Path | None = None) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        value = value.strip()
+        if value and value[0] in "\"'":                 # quoted -> take up to the closing quote
+            quote = value[0]
+            end = value.find(quote, 1)
+            value = value[1:end] if end != -1 else value[1:]
+        else:                                            # unquoted -> strip inline comment
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+        os.environ.setdefault(key.strip(), value)
 
 
 @lru_cache(maxsize=1)

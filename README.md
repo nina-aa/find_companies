@@ -3,9 +3,11 @@
 Natural-language company mandate → ranked, evidence-backed shortlist over a
 50,000-row synthetic dataset. Built for the Comparables.ai technical assessment.
 
-> **Status:** M1–M3 complete (data foundation, retrieval tools, LLM layer + all 7
-> workflow nodes). M4 (bounded runner + CLI `run` + HTTP API) and M5 (eval + deploy)
-> in progress — see `PLAN.md` (not committed) for the full roadmap.
+> **Status:** M1–M4 complete — data foundation, retrieval tools, LLM layer, all 7
+> workflow nodes, the bounded runner (custom driver **and** LangGraph), CLI
+> `run` / `eval`, the FastAPI endpoint, and structured logging. The eval harness
+> reports 7/7 green on the deterministic checks. M5 (deploy + README polish) next.
+> See `PLAN.md` (not committed) for the full roadmap.
 
 ---
 
@@ -20,8 +22,17 @@ python -m app.cli ingest
 # Sanity-check it with raw SQL.
 python -m app.cli db "SELECT industry, COUNT(*) FROM companies GROUP BY industry"
 
-# Interpret a mandate + build the plan + feasibility check (needs an OpenAI key).
-python -m app.cli check "German drug-discovery companies, preferably founded after 2018" --provider openai
+# Full workflow on one mandate (needs an OpenAI key; ~$0.002, ~10s).
+python -m app.cli run "German drug-discovery companies, preferably founded after 2018" \
+  --provider openai --verbose --explain
+
+# The evaluation set -> report table + eval/RESULTS.md
+python -m app.cli eval --provider openai
+
+# HTTP API
+uvicorn app.api:app --port 8000
+curl -s -X POST localhost:8000/agent/search -H 'X-API-Key: <key>' \
+  -H 'content-type: application/json' -d '{"query":"UK fintech doing payments or lending"}'
 
 # Run the test suite (offline, no API tokens).
 python -m pytest
@@ -66,6 +77,12 @@ grounding checks — is deterministic and testable without the API.
 | `app/state.py` | Mandate / plan / validation schemas, `RunState`, `RunTrace`, `AgentResponse`. |
 | `app/prompts.py` | Prompt builders for the two LLM calls (pure functions). |
 | `app/nodes.py` | The 7 workflow nodes as `RunState → RunState` functions. |
+| `app/budget.py` | `BudgetGuard` — the hard bound on LLM calls / iterations / revisions / deadline. |
+| `app/workflow.py` | `run_workflow()` + the custom bounded driver. |
+| `app/graph.py` | The LangGraph engine (same nodes, same guard). |
+| `app/api.py` | FastAPI: `POST /agent/search`, `X-API-Key` guard. |
+| `app/logging.py` | Stdlib JSON structured logging, one record per stage. |
+| `app/evaluate.py` | Assessment eval harness → `eval/RESULTS.md`. |
 | `app/revenue.py` | `revenue_range` bucket ↔ euro-interval parsing. |
 | `app/config.py` | Loads `schema_map.yaml` / `regions.yaml` / `lexicon.yaml`; region + industry resolution. |
 | `app/cli.py` | Command-line entry point (the primary test surface). |
@@ -178,7 +195,43 @@ from `evidence` to `inference`. A cited quote is an LLM claim until checked.
 `relax_preferences` is a fixed ladder (widen founding-year → drop it → drop the
 employee band → enlarge the pool), never an LLM call — Q4 specifies the rule
 itself. Mandatory criteria and exclusions are never touched; at most one revision
-per run.
+per run. On this dataset revision rarely triggers from a query string (templated
+descriptions keep most candidates verifiable), so the path is proven by a unit
+test that scripts an empty first validation pass.
+
+### D12a — The narrowing funnel is reported explicitly
+`RunTrace.funnel` (in `--verbose`, the `run.funnel` log line, and
+`metadata.funnel`) records the count at every narrowing step —
+`mandatory_filters → topic_match → after_exclusions → retrieved_pool (≤100) →
+sent_to_validation (≤10) → passed_validation → returned`. So "580 companies
+matched, why did I get 10?" is answerable from one block: a topic filter, a bm25
+sort, and the two hard caps.
+
+### D12 — `BudgetGuard` is the real bound, not the framework
+[app/budget.py](app/budget.py) is checked at the entry of every node (both
+engines) and caps LLM calls (≤5), retrieval iterations (≤2), revisions (≤1), pool
+(≤100), validation batch (≤10), results (≤10) and a wall-clock deadline. A breach
+raises `BudgetExceeded`; `run_workflow` catches it, records the reason, and still
+returns a composed (partial) `AgentResponse` with `stop_reason` set — never an
+exception, never an unbounded loop. LangGraph's `recursion_limit` is only a
+secondary backstop.
+
+### D13 — Custom driver first, LangGraph second, same signature
+[app/workflow.py](app/workflow.py) ships a ~40-line bounded driver; [app/graph.py](app/graph.py)
+is the LangGraph port using the *same* node functions and guard, with `RunState`
+carried under one key so there are no partial-dict reducers to reason about.
+`cfg.engine` selects (`driver` default); a test asserts both produce identical
+results. The JD names LangGraph as a required skill — this demonstrates it while
+keeping a framework-free fallback.
+
+### D14 — Deterministic preference ranking + capability gate
+The LLM's `relevance_score` proved weak at ordering. Structured preferences
+(founding-year, headcount, revenue) are scored deterministically in
+`_preference_fit` and drive both the retrieval pool re-rank (so
+preference-matching companies reach validation instead of being truncated by
+bm25) and the final sort. The AND/OR logic over capabilities also lives in code:
+the model reports per-capability support, and `validate_and_rank` applies "at
+least one of" / "all of" — it never asks the model to do set logic.
 
 ---
 

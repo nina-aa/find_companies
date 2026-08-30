@@ -105,12 +105,15 @@ class FeasibilityResult(BaseModel):
 # ==========================================================================
 # validate_and_rank  —  LLM call #2/#3 schema  (NO company fields)
 # ==========================================================================
-class MandatoryCheck(BaseModel):
-    requirement: str
-    met: bool
-    source_field: str = ""   # "" when the judgement is not text-grounded
-    quote: str = ""          # must be a literal substring of source_field (checked later)
-    inference: str = ""      # reasoning when there is no direct quote
+class TextFinding(BaseModel):
+    """The model's judgement on ONE requirement it was asked about. The AND/OR
+    logic over these is applied deterministically in code, not by the model."""
+
+    requirement: str          # the exact capability / serve phrase it was given
+    supported: bool
+    source_field: str = ""    # "description" | "name" | "" if not quotable
+    quote: str = ""           # verbatim substring of source_field (verified later)
+    note: str = ""            # reasoning, esp. when supported is false or unquotable
 
 
 class PreferenceSignal(BaseModel):
@@ -121,8 +124,8 @@ class PreferenceSignal(BaseModel):
 
 class CandidateJudgement(BaseModel):
     candidate_id: int
-    verdict: Verdict
-    mandatory_checks: list[MandatoryCheck] = Field(default_factory=list)
+    capability_findings: list[TextFinding] = Field(default_factory=list)
+    serves_findings: list[TextFinding] = Field(default_factory=list)
     preference_signals: list[PreferenceSignal] = Field(default_factory=list)
     relevance_score: float = 0.0
     rationale: str = ""
@@ -150,6 +153,7 @@ class RankedCompany(BaseModel):
     company: Company
     verdict: Verdict
     relevance_score: float
+    preference_score: float = 0.0     # deterministic fit to structured preferences
     mandatory_met: int = 0
     evidence: list[Evidence] = Field(default_factory=list)
     inferences: list[Inference] = Field(default_factory=list)
@@ -177,8 +181,21 @@ class StageRecord(BaseModel):
     llm_calls: int = 0
 
 
+class Funnel(BaseModel):
+    """How many companies survive each narrowing stage."""
+
+    mandatory_filters: int = 0     # structured WHERE (feasibility gate)
+    topic_match: int = 0           # + FTS5 topic query
+    after_exclusions: int = 0      # - exclusion gate
+    retrieved_pool: int = 0        # - pool cap (<=100), bm25-ranked
+    sent_to_validation: int = 0    # - validation batch cap (<=10)
+    passed_validation: int = 0     # - LLM verdict + capability gate
+    returned: int = 0              # - result cap (<=10)
+
+
 class RunTrace(BaseModel):
     run_id: str
+    funnel: Funnel = Field(default_factory=Funnel)
     stages: list[StageRecord] = Field(default_factory=list)
     tools: list[ToolCall] = Field(default_factory=list)
     llm_calls: int = 0
@@ -227,6 +244,7 @@ class ResponseMetadata(BaseModel):
     tools_called: list[ToolCall] = Field(default_factory=list)
     candidates_retrieved_per_iteration: list[int] = Field(default_factory=list)
     candidates_validated: int = 0
+    funnel: Funnel = Field(default_factory=Funnel)
     validation_outcome: dict = Field(default_factory=dict)
     revised_search_performed: bool = False
     llm_calls: int = 0
@@ -238,6 +256,9 @@ class ResponseMetadata(BaseModel):
     model: str = ""
     provider: str = ""
     timed_out: bool = False
+    stop_reason: str = ""
+    cache_hits: int = 0
+    revision: RevisionRecord | None = None
 
 
 class ResultItem(BaseModel):
@@ -251,6 +272,7 @@ class ResultItem(BaseModel):
     revenue_range: str | None
     verdict: Verdict
     relevance_score: float
+    preference_score: float = 1.0
     evidence: list[Evidence] = Field(default_factory=list)
     inferences: list[Inference] = Field(default_factory=list)
     unmet_preferences: list[str] = Field(default_factory=list)
@@ -280,6 +302,7 @@ class RunConfig(BaseModel):
     validation_batch: int = 10
     result_limit: int = 10
     pool_limit: int = 100
+    engine: Literal["driver", "graph"] = "driver"
 
 
 class RunState(BaseModel):
@@ -308,6 +331,9 @@ class RunState(BaseModel):
     budget: BudgetState = Field(default_factory=BudgetState)
     trace: RunTrace | None = None
     response: AgentResponse | None = None
+
+    stop_reason: str = ""          # "" = ran to completion; else deadline/budget/degraded:<kind>
+    timed_out: bool = False
 
     def ensure_trace(self) -> RunTrace:
         if self.trace is None:

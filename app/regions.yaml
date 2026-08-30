@@ -25,6 +25,8 @@ regions:
   europe:        [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
   european:      [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
   eu:            [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
+  "european union": [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
+  "e.u.":        [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
   eea:           [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
   "continental europe": [Germany, France, Netherlands]
   dach:          [Germany]                             # Austria, Switzerland absent

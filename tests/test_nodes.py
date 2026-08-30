@@ -15,12 +15,12 @@ from app.nodes import (
 )
 from app.state import (
     CandidateJudgement,
-    MandatoryCheck,
     MandateConstraints,
     MandateCriteria,
     PreferenceSignal,
     RunConfig,
     RunState,
+    TextFinding,
     ValidationBatch,
 )
 
@@ -30,6 +30,11 @@ def _deps(fixture_db, *, handler=None, responses=None):
         llm=LLMClient(FakeProvider(handler=handler, responses=responses)),
         db_path=fixture_db,
     )
+
+
+def _cap(term, supported=True, quote=""):
+    return TextFinding(requirement=term, supported=supported,
+                       source_field="description" if quote else "", quote=quote)
 
 
 def _state(query="q", **cfg):
@@ -164,32 +169,28 @@ def _fraud_state(fixture_db):
     return retrieve(state, _deps(fixture_db))
 
 
-def test_validate_keeps_match_drops_no(fixture_db):
+def test_validate_keeps_supported_capability_drops_rejected(fixture_db):
     state = _fraud_state(fixture_db)
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, verdict="match", relevance_score=0.9,
-                           mandatory_checks=[MandatoryCheck(
-                               requirement="does fraud detection", met=True,
-                               source_field="description", quote="fraud detection")]),
-        CandidateJudgement(candidate_id=3, verdict="no", relevance_score=0.1),
+        CandidateJudgement(candidate_id=1, relevance_score=0.9,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
+        # id 3 explicitly judged unsupported -> FTS must not rescue it
+        CandidateJudgement(candidate_id=3, relevance_score=0.1,
+                           capability_findings=[_cap("fraud detection", supported=False)]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
     assert [r.company.id for r in state.results] == [1]
+    assert state.results[0].verdict == "match"
     assert state.results[0].evidence[0].quote == "fraud detection"
 
 
 def test_validate_span_grounding_demotes_ungrounded_quote(fixture_db):
     state = _fraud_state(fixture_db)
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, verdict="match", relevance_score=0.8,
-                           mandatory_checks=[
-                               MandatoryCheck(requirement="real", met=True,
-                                              source_field="description",
-                                              quote="fraud detection"),
-                               MandatoryCheck(requirement="hallucinated", met=True,
-                                              source_field="description",
-                                              quote="quantum blockchain casino"),
-                           ]),
+        CandidateJudgement(candidate_id=1, relevance_score=0.8, capability_findings=[
+            _cap("fraud detection", quote="fraud detection"),
+            _cap("banking analytics", quote="quantum blockchain casino"),
+        ]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
     r = state.results[0]
@@ -197,13 +198,25 @@ def test_validate_span_grounding_demotes_ungrounded_quote(fixture_db):
     assert any("quantum blockchain casino" in inf.basis for inf in r.inferences)
 
 
-def test_validate_drops_candidate_with_unmet_mandatory(fixture_db):
+def test_validate_serves_unmet_makes_partial_not_dropped(fixture_db):
+    state = _fraud_state(fixture_db)
+    state.plan.serves = ["European banks"]
+    batch = ValidationBatch(judgements=[
+        CandidateJudgement(candidate_id=1, relevance_score=0.5,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")],
+                           serves_findings=[TextFinding(requirement="European banks",
+                                                        supported=False, note="not stated")]),
+    ])
+    state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
+    assert [r.company.id for r in state.results] == [1]
+    assert state.results[0].verdict == "partial"
+
+
+def test_validate_drops_candidate_with_no_capability_support(fixture_db):
     state = _fraud_state(fixture_db)
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, verdict="partial", relevance_score=0.5,
-                           mandatory_checks=[MandatoryCheck(
-                               requirement="serves banks", met=False,
-                               source_field="", inference="no mention of banks")]),
+        CandidateJudgement(candidate_id=1, relevance_score=0.5,
+                           capability_findings=[_cap("fraud detection", supported=False)]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
     assert state.results == []
@@ -266,13 +279,10 @@ def test_compose_infeasible_sets_empty_reason(fixture_db):
 
 def test_compose_with_results_builds_result_items(fixture_db):
     state = _fraud_state(fixture_db)
+    state.plan.preferences = MandateConstraints(founded_year_gte=2020)  # id 1 founded 2019
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, verdict="match", relevance_score=0.9,
-                           mandatory_checks=[MandatoryCheck(
-                               requirement="fraud detection", met=True,
-                               source_field="description", quote="fraud detection")],
-                           preference_signals=[PreferenceSignal(
-                               preference="founded after 2015", matched=False)]),
+        CandidateJudgement(candidate_id=1, relevance_score=0.9,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
     state.feasibility = None
@@ -281,5 +291,5 @@ def test_compose_with_results_builds_result_items(fixture_db):
     assert item.rank == 1 and item.company_id == 1
     assert item.name == "Helsinki Fraud Labs"
     assert item.evidence[0].quote == "fraud detection"
-    assert item.unmet_preferences == ["founded after 2015"]
+    assert item.unmet_preferences == ["founded before 2020"]
     assert state.response.metadata.stages_executed[-1] == "compose_response"

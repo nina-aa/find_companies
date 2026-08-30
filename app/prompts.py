@@ -105,28 +105,30 @@ def interpret_messages(query: str) -> list[dict]:
 # validate_and_rank
 # --------------------------------------------------------------------------- #
 VALIDATE_SYSTEM = """\
-You judge whether each candidate company genuinely matches a company-search
-mandate, and extract evidence.
+For each candidate company, judge whether the record supports specific
+requirements, and extract evidence. You do NOT decide the overall verdict — that
+is computed from your findings.
 
-Every candidate has ALREADY passed the mandatory STRUCTURED filters (country,
-industry, numeric bounds) — do not re-check those. Spend your effort on:
-- the mandatory requirements that need a judgement from the description text
-  (e.g. "directly provides fraud detection", "serves European banks");
-- which soft preferences the record matches;
-- a short evidence quote for each text judgement.
+Every candidate has ALREADY passed the structured filters (country, industry,
+numeric bounds); the `already_verified_do_not_recheck` block lists them. Ignore
+those. Answer only what is asked:
 
-For every mandatory_check:
-- `met`: true only if the record genuinely supports it.
-- `quote`: copy a VERBATIM substring from the stated `source_field` (usually
-  "description" or "name"). If you cannot quote it, leave `quote` empty and
-  explain in `inference`. Never paraphrase inside `quote`.
-- `source_field`: which field the quote came from.
+- `capabilities_to_check`: for EACH phrase, add one entry to `capability_findings`
+  with `requirement` set to that exact phrase and `supported` true/false.
+- `serves_to_check`: for EACH phrase, add one entry to `serves_findings`. Thin
+  descriptions often will not state the customer — then `supported` is false with
+  a short `note`.
+- `preferences_to_check`: for each, add a `preference_signals` entry.
+- If a list is empty, return an empty findings list for it. Never invent a
+  requirement that was not given to you.
 
-verdict:
-- "match"   — every mandatory requirement is satisfied.
-- "partial" — mandatory requirements satisfied but weak, or only some preferences.
-- "no"      — a mandatory requirement is not supported by the record.
-relevance_score: 0.0-1.0, higher = stronger fit including preferences.
+For every finding:
+- `quote`: a VERBATIM substring copied from `source_field` ("description" or
+  "name"). If you cannot quote it, leave `quote` empty and use `note`. Never
+  paraphrase inside `quote`.
+
+relevance_score: 0.0-1.0 — overall strength of fit including preferences.
+rationale: one sentence.
 """
 
 
@@ -144,18 +146,18 @@ def _candidate_block(cand: Candidate, plan: SearchPlan) -> dict:
             "employee_count": cand.employee_count,
             "revenue_range": cand.revenue_range,
         },
-        "already_structurally_satisfied": {
+        "already_verified_do_not_recheck": {
             "industry": plan.filters.industries,
             "location": plan.filters.resolved_locations(),
             "founded_year": [plan.filters.founded_year_gte, plan.filters.founded_year_lte],
             "employee_count": [plan.filters.employee_count_gte, plan.filters.employee_count_lte],
         },
-        "needs_text_judgement": {
-            "capabilities_any": plan.topic_terms if plan.topic_mode == "any" else [],
-            "capabilities_all": plan.topic_terms if plan.topic_mode == "all" else [],
-            "serves": plan.serves,
-        },
-        "topic_terms_found_in_text": cand.matched_topics,
+        "capabilities_to_check": plan.topic_terms,
+        "capability_match_rule": (
+            "at_least_one" if plan.topic_mode == "any" else "all"
+        ),
+        "serves_to_check": plan.serves,
+        "capability_terms_already_found_in_text": cand.matched_topics,
         "preferences_to_check": plan.preferences.model_dump(exclude_defaults=True),
     }
 

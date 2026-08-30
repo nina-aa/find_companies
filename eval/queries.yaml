@@ -129,24 +129,26 @@ Q5:
 
 S1:
   query: >
-    Find German drug-discovery companies founded after 2023.
+    Find German biotech companies working on gene editing, founded after 2020.
   expected:
     mandatory:
       countries: [Germany]
       industries: [Biotech]
-      capabilities_any: ["drug discovery"]
-    preferences:
-      founded_year: { gte: 2024 }
+      capabilities_any: ["gene editing"]
+      founded_year: { gte: 2021 }
+    preferences: {}
     exclusions: {}
-    should_revise: true
+    should_revise: false
     should_be_empty: false
   notes: >
-    Only 18 German Biotech drug-discovery companies founded >= 2023 (9 for >= 2024).
-    The dataset is dense enough that a plain count rarely drops below 3, so the
-    revision trigger fires when the restrictive founded-year preference pushes strong
-    matches out of the validated top-10. Demonstrate deterministically with
-    `--min-results 5` if it does not trip naturally; document "revision is
-    data-limited" either way.
+    REVISION IS DATA-LIMITED and cannot be forced honestly from a query string on
+    this dataset: the templated descriptions make "drug discovery" / "gene editing"
+    almost always verifiable, so the validated set rarely falls below the
+    min_results threshold, so `relax_preferences` does not trigger. The revision
+    ladder is instead proven by a unit test (`test_workflow.test_revision_path_runs_once`,
+    which scripts an empty first validation pass). This query is kept as a tight
+    real-data filter (few GE Biotech founded >= 2024 with < 50 staff) that should
+    still return a small non-empty list without padding.
 
 S3:
   query: >

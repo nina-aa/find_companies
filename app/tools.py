@@ -21,6 +21,7 @@ from pathlib import Path
 
 from app import config
 from app.db import DEFAULT_DB, connect
+from app.revenue import parse_bucket
 from app.schemas import (
     MAX_LIMIT,
     Candidate,
@@ -180,12 +181,15 @@ def search_companies(
         matched = [
             term for term, low in zip(topic_terms, lowered_terms) if low in haystack
         ]
+        lo_hi = parse_bucket(r["revenue_range"])
         candidates.append(
             Candidate(
                 id=r["id"], name=r["name"], description=r["description"],
                 industry=r["industry"], location=r["location"],
                 founded_year=r["founded_year"], employee_count=r["employee_count"],
                 revenue_range=r["revenue_range"],
+                revenue_min_eur=lo_hi[0] if lo_hi else None,
+                revenue_max_eur=lo_hi[1] if lo_hi else None,
                 bm25_score=r["bm25_score"],
                 matched_topics=matched,
                 rank=i,
@@ -195,6 +199,7 @@ def search_companies(
     return SearchResult(
         candidates=candidates,
         matched_filters=matched_filters,
+        matched_query=n_before if match is not None else matched_filters,
         excluded=n_before - n_after,
         fts_query=match,
         truncated=n_after > limit,

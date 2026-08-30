@@ -334,9 +334,12 @@ def build_client(
 ) -> LLMClient:
     if provider == "openai":
         impl: Provider = OpenAIProvider(model=model, api_key=api_key)
+        # The cache only matters for the paid provider — it makes eval/dev re-runs
+        # fast and near-free. The fake provider is already instant and free.
+        cache = ResponseCache(cache_path) if use_cache else None
     elif provider == "fake":
         impl = FakeProvider()
+        cache = None
     else:
         raise ValueError(f"unknown provider {provider!r}")
-    cache = ResponseCache(cache_path) if use_cache else None
     return LLMClient(impl, cache=cache)

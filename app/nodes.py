@@ -83,25 +83,33 @@ def build_search_plan(state: RunState, deps: NodeDeps) -> RunState:
         else:
             notes.append(f"dropped unknown industry {raw!r} (not one of the 10 labels)")
 
-    # regions: keep the words, but flag unknown / empty ones
-    regions: list[str] = []
-    for raw in m.regions:
+    # geography: resolve every country/region/alias term to concrete dataset
+    # country names. "United Kingdom" -> "UK", "Nordic" -> FI/NO/SE, etc.
+    countries: set[str] = set()
+    empty_region_terms: list[str] = []
+    for raw in list(m.countries) + list(m.regions):
         res = config.resolve_region(raw)
         if not res.known:
-            notes.append(f"unknown region {raw!r} — recorded as ambiguity, not filtered")
+            notes.append(f"unknown location {raw!r} — recorded as ambiguity, not filtered")
         elif res.empty_region:
-            regions.append(raw)
+            empty_region_terms.append(raw)
             notes.append(f"region {raw!r} contains no companies in this dataset")
         else:
-            regions.append(raw)
+            countries.update(res.countries)
 
     # topic terms: capabilities_all takes precedence for validator intent
-    topic_all = _dedupe(m.capabilities_all)
-    topic_any = _dedupe(m.capabilities_any)
+    topic_all, ind_all = _normalise_topics(m.capabilities_all, notes)
+    topic_any, ind_any = _normalise_topics(m.capabilities_any, notes)
     topic_terms = _dedupe(topic_all + topic_any)
     topic_mode = "all" if topic_all else "any"
 
-    # lexicon safety net: if no industry survived, try to infer one
+    # lexicon safety net: if no industry survived, infer from the capability terms,
+    # then from the raw query text.
+    if not industries:
+        for cand_ind in ind_all + ind_any:
+            industries.append(cand_ind)
+            notes.append(f"industry {cand_ind!r} inferred from a capability phrase")
+            break
     if not industries:
         for hit in config.lookup_phrases(state.query):
             if hit.industry:
@@ -111,8 +119,8 @@ def build_search_plan(state: RunState, deps: NodeDeps) -> RunState:
                 break
 
     filters = StructuredFilters(
-        countries=_dedupe(m.countries),
-        regions=regions,
+        countries=sorted(countries),
+        regions=empty_region_terms,
         industries=_dedupe(industries),
         founded_year_gte=m.founded_year_gte,
         founded_year_lte=m.founded_year_lte,
@@ -155,6 +163,39 @@ def build_search_plan(state: RunState, deps: NodeDeps) -> RunState:
     return state
 
 
+_GENERIC_TAIL = ("technology", "technologies", "software", "solutions", "solution",
+                 "platform", "platforms", "systems", "system", "services", "tools")
+
+
+def _normalise_topics(terms, notes: list[str]) -> tuple[list[str], list[str]]:
+    """Map free-text capability phrases onto the lexicon's canonical topic terms
+    (so "fraud detection technology" -> "fraud detection"), and collect any
+    industry each phrase implies. Unknown phrases are kept as-is."""
+    topics: list[str] = []
+    industries: list[str] = []
+    for raw in terms:
+        term = (raw or "").strip()
+        if not term:
+            continue
+        words = term.split()
+        if len(words) > 1 and words[-1].lower() in _GENERIC_TAIL:
+            term = " ".join(words[:-1])
+        hits = config.lookup_phrases(term)
+        canon = next((h for h in hits if h.phrase.lower() in term.lower()), None)
+        if canon and canon.topics:
+            for t in canon.topics:
+                if t not in topics:
+                    topics.append(t)
+            if canon.industry:
+                industries.append(canon.industry)
+            if term.lower() != raw.strip().lower() or canon.topics != [raw.strip()]:
+                notes.append(f"capability {raw.strip()!r} -> {canon.topics}")
+        else:
+            if term not in topics:
+                topics.append(term)
+    return topics, industries
+
+
 def _dedupe(items) -> list[str]:
     seen: dict[str, None] = {}
     for it in items:
@@ -177,6 +218,7 @@ def check_feasibility(state: RunState, deps: NodeDeps) -> RunState:
         + _describe_filters(plan.filters)
     )
     state.feasibility = FeasibilityResult(feasible=feasible, matched=matched, reason=reason)
+    trace.funnel.mandatory_filters = matched
     trace.add_tool("count_matching", ok=True, result_count=matched)
     trace.add_stage("check_feasibility",
                     note=f"{matched} rows match the mandatory filters"
@@ -222,18 +264,41 @@ def retrieve(state: RunState, deps: NodeDeps) -> RunState:
         limit=pool_limit,
         db_path=deps.db_path,
     )
-    state.pool = result.candidates
+    # bm25 is recall-oriented and preference-blind. Re-rank the pool by structured
+    # preference fit (then bm25 order) so preference-satisfying companies reach the
+    # validation batch instead of being truncated out. Preferences never filter.
+    ordered = list(enumerate(result.candidates))
+    ordered.sort(key=lambda pair: (
+        -_preference_fit(pair[1], plan.preferences)[0],
+        pair[0],
+    ))
+    for new_rank, (_, cand) in enumerate(ordered, start=1):
+        cand.rank = new_rank
+    state.pool = [cand for _, cand in ordered]
     state.last_search = result
     state.iteration += 1
     state.budget.iterations += 1
     state.retrieved_per_iteration.append(len(result.candidates))
+
+    f = trace.funnel
+    f.topic_match = result.matched_query
+    f.after_exclusions = result.matched_query - result.excluded
+    f.retrieved_pool = len(result.candidates)
+
     trace.add_tool(
         "search_companies", ok=True, result_count=len(result.candidates),
-        detail=f"matched_filters={result.matched_filters} excluded={result.excluded} "
+        detail=f"matched_filters={result.matched_filters} "
+               f"topic_match={result.matched_query} excluded={result.excluded} "
                f"fts={result.fts_query!r}",
     )
-    trace.add_stage("retrieve", note=f"iteration {state.iteration}: "
-                    f"{len(result.candidates)} candidates")
+    capped = " (pool cap)" if result.matched_query - result.excluded > len(result.candidates) else ""
+    trace.add_stage(
+        "retrieve",
+        note=(f"iteration {state.iteration}: "
+              f"{result.matched_filters} filtered -> {result.matched_query} topic"
+              + (f" -> {f.after_exclusions} after exclusions" if result.excluded else "")
+              + f" -> {len(result.candidates)} pool{capped}"),
+    )
     return state
 
 
@@ -264,6 +329,9 @@ def validate_and_rank(state: RunState, deps: NodeDeps) -> RunState:
     state.judgements = result.parsed.judgements
 
     companies = {c.id: c for c in get_by_ids([c.id for c in batch], db_path=deps.db_path)}
+    fts_matched = {c.id: set(c.matched_topics) for c in batch}
+    required_caps = list(plan.topic_terms)
+    require_all = plan.topic_mode == "all"
     ranked: list[RankedCompany] = []
     demoted = 0
 
@@ -271,61 +339,130 @@ def validate_and_rank(state: RunState, deps: NodeDeps) -> RunState:
         company = companies.get(j.candidate_id)
         if company is None:
             continue
-        if j.verdict == "no":
-            continue
 
         evidence: list[Evidence] = []
         inferences: list[Inference] = []
-        mandatory_ok = True
-        met = 0
-        for check in j.mandatory_checks:
-            if not check.met:
-                mandatory_ok = False
-            else:
-                met += 1
-            grounded = _span_grounded(check.quote, check.source_field, company)
-            if check.quote and grounded:
-                evidence.append(Evidence(requirement=check.requirement,
-                                         source_field=check.source_field,
-                                         quote=check.quote))
-            else:
-                basis = check.inference or ("unverified quote: " + check.quote
-                                            if check.quote else "no quote provided")
-                if check.quote and not grounded:
+
+        def _record(finding, *, as_requirement: str):
+            nonlocal demoted
+            grounded = _span_grounded(finding.quote, finding.source_field, company)
+            if finding.supported and finding.quote and grounded:
+                evidence.append(Evidence(requirement=as_requirement,
+                                         source_field=finding.source_field or "description",
+                                         quote=finding.quote))
+            elif finding.supported:
+                if finding.quote and not grounded:
                     demoted += 1
-                inferences.append(Inference(claim=check.requirement, basis=basis))
+                inferences.append(Inference(
+                    claim=as_requirement,
+                    basis=finding.note or ("unverified quote: " + finding.quote
+                                           if finding.quote else "supported, no quote"),
+                ))
 
-        if not mandatory_ok:
+        supported_caps = {f.requirement for f in j.capability_findings if f.supported}
+        rejected_caps = {f.requirement for f in j.capability_findings if not f.supported}
+        for f in j.capability_findings:
+            _record(f, as_requirement=f"capability: {f.requirement}")
+        for f in j.serves_findings:
+            _record(f, as_requirement=f"serves: {f.requirement}")
+
+        # FTS only rescues a capability the model did not mention at all — never one
+        # it explicitly judged unsupported.
+        cap_signal = supported_caps | (
+            fts_matched.get(j.candidate_id, set()) - rejected_caps
+        )
+
+        # deterministic capability gate (the AND/OR logic lives here, not in the LLM)
+        if not required_caps:
+            cap_ok = True
+        elif require_all:
+            cap_ok = all(c in cap_signal for c in required_caps)
+        else:
+            cap_ok = bool(cap_signal & set(required_caps))
+
+        serves_required = list(plan.serves)
+        serves_ok = (not serves_required) or all(
+            any(f.requirement == s and f.supported for f in j.serves_findings)
+            for s in serves_required
+        )
+
+        if not cap_ok:
             continue
+        verdict = "match" if serves_ok else "partial"
+        met = len(supported_caps) + sum(1 for f in j.serves_findings if f.supported)
 
-        unmet = [s.preference for s in j.preference_signals if not s.matched]
+        # Structured preferences are scored deterministically (more reliable than the
+        # model's relevance_score); non-structural preference signals come from the LLM.
+        # structured preferences are scored + reported deterministically
+        pref_score, pref_unmet = _preference_fit(company, plan.preferences)
         ranked.append(RankedCompany(
             company=company,
-            verdict=j.verdict,
+            verdict=verdict,
             relevance_score=max(0.0, min(1.0, j.relevance_score)),
+            preference_score=pref_score,
             mandatory_met=met,
             evidence=evidence,
             inferences=inferences,
-            unmet_preferences=unmet,
+            unmet_preferences=pref_unmet,
             rationale=j.rationale,
         ))
 
     ranked.sort(key=lambda r: (
         VERDICT_RANK[r.verdict],
-        r.mandatory_met,
+        r.preference_score,
         r.relevance_score,
-        -len(r.unmet_preferences),
+        r.mandatory_met,
     ), reverse=True)
 
     state.ranked = ranked
     state.results = ranked[: state.cfg.result_limit]
     n_match = sum(1 for r in ranked if r.verdict == "match")
+
+    f = trace.funnel
+    f.sent_to_validation = len(batch)
+    f.passed_validation = len(ranked)
+    f.returned = len(state.results)
+
     trace.add_stage(
         "validate_and_rank", llm_calls=1,
-        note=f"{len(batch)} judged -> {len(ranked)} kept ({n_match} match); "
+        note=f"{len(batch)} sent -> {len(ranked)} passed ({n_match} match, "
+             f"{len(ranked) - n_match} partial) -> {len(state.results)} returned; "
              f"{demoted} quote(s) demoted to inference",
     )
     return state
+
+
+def _preference_fit(company, prefs) -> tuple[float, list[str]]:
+    """Deterministic score in [0, 1] for how well a company's structured fields
+    match the soft preferences, plus a list of the ones it misses. Preferences
+    never filter — this only re-ranks."""
+    checks: list[tuple[bool, str]] = []
+    fy = company.founded_year
+    ec = company.employee_count
+
+    if prefs.founded_year_gte is not None:
+        checks.append(((fy or 0) >= prefs.founded_year_gte,
+                       f"founded before {prefs.founded_year_gte}"))
+    if prefs.founded_year_lte is not None:
+        checks.append(((fy or 9999) <= prefs.founded_year_lte,
+                       f"founded after {prefs.founded_year_lte}"))
+    if prefs.employee_count_gte is not None:
+        checks.append(((ec or 0) >= prefs.employee_count_gte,
+                       f"fewer than {prefs.employee_count_gte} employees"))
+    if prefs.employee_count_lte is not None:
+        checks.append(((ec or 10**9) <= prefs.employee_count_lte,
+                       f"more than {prefs.employee_count_lte} employees"))
+    if prefs.revenue_eur_lte is not None and company.revenue_min_eur is not None:
+        checks.append((company.revenue_min_eur < prefs.revenue_eur_lte,
+                       f"revenue above EUR {prefs.revenue_eur_lte:,}"))
+    if prefs.revenue_eur_gte is not None and company.revenue_max_eur is not None:
+        checks.append((company.revenue_max_eur >= prefs.revenue_eur_gte,
+                       f"revenue below EUR {prefs.revenue_eur_gte:,}"))
+
+    if not checks:
+        return 1.0, []
+    hits = sum(1 for ok, _ in checks if ok)
+    return hits / len(checks), [msg for ok, msg in checks if not ok]
 
 
 def _span_grounded(quote: str, source_field: str, company) -> bool:
@@ -410,6 +547,11 @@ def compose_response(state: RunState, deps: NodeDeps) -> RunState:
 
     if state.feasibility and not state.feasibility.feasible:
         empty_reason = state.feasibility.reason
+    elif state.stop_reason.startswith("degraded:") and not state.results:
+        empty_reason = (
+            "the run stopped early (" + state.stop_reason.split(":", 1)[1]
+            + ") before candidates could be validated"
+        )
     else:
         for i, r in enumerate(state.results, start=1):
             c = r.company
@@ -418,6 +560,7 @@ def compose_response(state: RunState, deps: NodeDeps) -> RunState:
                 location=c.location, founded_year=c.founded_year,
                 employee_count=c.employee_count, revenue_range=c.revenue_range,
                 verdict=r.verdict, relevance_score=r.relevance_score,
+                preference_score=r.preference_score,
                 evidence=r.evidence, inferences=r.inferences,
                 unmet_preferences=r.unmet_preferences,
             ))
@@ -435,6 +578,7 @@ def compose_response(state: RunState, deps: NodeDeps) -> RunState:
         tools_called=list(trace.tools),
         candidates_retrieved_per_iteration=list(state.retrieved_per_iteration),
         candidates_validated=len(state.judgements),
+        funnel=trace.funnel,
         validation_outcome={
             "matched": n_match,
             "partial": n_partial,
@@ -442,13 +586,17 @@ def compose_response(state: RunState, deps: NodeDeps) -> RunState:
             "empty_reason": empty_reason or None,
         },
         revised_search_performed=state.revision.performed,
+        revision=state.revision,
         llm_calls=trace.llm_calls,
         llm_attempts=trace.llm_attempts,
+        cache_hits=trace.cache_hits,
         prompt_tokens=trace.prompt_tokens,
         completion_tokens=trace.completion_tokens,
         est_cost_usd=trace.est_cost_usd,
         model=state.cfg.model,
         provider=state.cfg.provider,
+        timed_out=state.timed_out,
+        stop_reason=state.stop_reason,
     )
 
     state.response = AgentResponse(

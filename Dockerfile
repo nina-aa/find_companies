@@ -1,4 +1,4 @@
-# Placeholder — fleshed out in M5 (C9). Kept here so the repo skeleton is complete.
+# Finalised in M5 (C9); already runnable now.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -13,5 +13,4 @@ COPY eval/ ./eval/
 RUN python -m app.ingest --input data/companies.json
 
 EXPOSE 7860
-# CMD is added in M4 once the HTTP API exists.
-CMD ["python", "-m", "app.cli", "--help"]
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "7860"]

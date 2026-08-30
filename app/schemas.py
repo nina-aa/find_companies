@@ -69,6 +69,8 @@ class StructuredFilters(BaseModel):
                 f"{alias}.location IN ({', '.join('?' for _ in locations)})"
             )
             params.extend(locations)
+        elif self.countries or self.regions:
+            clauses.append("0")   # a geography was asked for but it resolves to nothing
 
         for column, op, value in (
             ("founded_year", ">=", self.founded_year_gte),
@@ -105,6 +107,8 @@ class Candidate(BaseModel):
     founded_year: int | None
     employee_count: int | None
     revenue_range: str | None
+    revenue_min_eur: int | None = None
+    revenue_max_eur: int | None = None
     bm25_score: float | None = None          # None when no topic query was run
     matched_topics: list[str] = Field(default_factory=list)
     rank: int = 0                             # 1-based position in this result set
@@ -121,9 +125,10 @@ class SearchResult(BaseModel):
 
     candidates: list[Candidate] = Field(default_factory=list)
     matched_filters: int = 0            # rows passing the mandatory structured gate
+    matched_query: int = 0              # of those, how many also match the topic query
     excluded: int = 0                   # of those, how many the exclusions removed
     fts_query: str | None = None        # the FTS5 MATCH string actually used
-    truncated: bool = False             # more than `limit` matched
+    truncated: bool = False             # more matched than `limit` returned
 
 
 class Company(BaseModel):

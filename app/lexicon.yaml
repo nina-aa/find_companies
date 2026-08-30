@@ -54,8 +54,8 @@ phrases:
   "5g":                   { industry: Telecom,    topics: ["5G analytics"] }
 
   # --- Technology ---
-  "technology":           { industry: Technology, topics: [] }
-  "software":             { industry: Technology, topics: [] }
+  # NB: bare "technology" / "software" are intentionally NOT here — they are too
+  # generic and substring-match unrelated phrases ("fraud detection technology").
   "cloud infrastructure": { industry: Technology, topics: ["cloud infrastructure"] }
   "data pipelines":       { industry: Technology, topics: ["data pipelines"] }
   "observability":        { industry: Technology, topics: ["observability"] }
