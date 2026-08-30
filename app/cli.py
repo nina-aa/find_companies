@@ -4,6 +4,8 @@ Subcommands land as their dependencies are built:
 
 * ``ingest``  (M1) — build the retrieval index.
 * ``db``      (M1) — run a raw ``SELECT`` against the index for sanity checks.
+* ``search``  (M2) — exercise the retrieval tools directly (no LLM), for checking
+                     filter / FTS / exclusion behaviour by hand.
 * ``check``   (M3) — interpret + plan + feasibility only (1 LLM call).
 * ``run``     (M4) — full workflow.
 * ``eval``    (M4) — run the eval query set and write RESULTS.md.
@@ -34,7 +36,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 def _cmd_db(args: argparse.Namespace) -> int:
     from app.db import connect, load_manifest
 
-    sql = args.sql.strip()
+    sql = " ".join(args.sql).strip()
     if not sql.lower().startswith(("select", "with", "explain", "pragma")):
         print("db: only read-only statements (SELECT / WITH / EXPLAIN / PRAGMA) allowed",
               file=sys.stderr)
@@ -64,6 +66,47 @@ def _cmd_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_search(args: argparse.Namespace) -> int:
+    from app.revenue import RevenueRange
+    from app.schemas import Exclusions, StructuredFilters
+    from app.tools import search_companies
+
+    filters = StructuredFilters(
+        countries=args.country,
+        regions=args.region,
+        industries=args.industry,
+        founded_year_gte=args.founded_gte,
+        founded_year_lte=args.founded_lte,
+        employee_count_gte=args.emp_gte,
+        employee_count_lte=args.emp_lte,
+        revenue=RevenueRange(min_eur=args.revenue_gte, max_eur=args.revenue_lte),
+    )
+    exclusions = Exclusions(industries=args.exclude_industry, keywords=args.exclude_keyword)
+    result = search_companies(
+        filters,
+        topic_terms=args.topic,
+        exclusions=exclusions,
+        limit=args.limit,
+        db_path=args.db,
+    )
+
+    if args.json:
+        print(result.model_dump_json(indent=2))
+        return 0
+
+    print(f"matched_filters={result.matched_filters}  excluded={result.excluded}  "
+          f"truncated={result.truncated}")
+    print(f"fts_query={result.fts_query!r}")
+    print(f"returned {len(result.candidates)} candidate(s):")
+    for c in result.candidates:
+        score = f"{c.bm25_score:+.2f}" if c.bm25_score is not None else " n/a "
+        topics = f"  topics={c.matched_topics}" if c.matched_topics else ""
+        print(f"  #{c.rank:>2} [{score}] id={c.id:<6} {c.name[:34]:<34} "
+              f"{(c.location or '?')[:11]:<11} {(c.industry or '?')[:10]:<10} "
+              f"founded={c.founded_year} emp={c.employee_count}{topics}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -75,11 +118,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.set_defaults(func=_cmd_ingest)
 
     p_db = sub.add_parser("db", help="run a read-only SQL query against the index")
-    p_db.add_argument("sql", help="a SELECT / WITH / EXPLAIN / PRAGMA statement")
+    p_db.add_argument("sql", nargs="+", help="a SELECT / WITH / EXPLAIN / PRAGMA statement "
+                                             "(put --json / --limit before it)")
     p_db.add_argument("--db", default=ingest_mod.DEFAULT_DB, help="path to companies.db")
     p_db.add_argument("--json", action="store_true", help="emit JSON rows")
     p_db.add_argument("--limit", type=int, default=50, help="max rows to print")
     p_db.set_defaults(func=_cmd_db)
+
+    p_s = sub.add_parser("search", help="run the retrieval tools directly (no LLM)")
+    p_s.add_argument("--country", action="append", default=[], metavar="NAME")
+    p_s.add_argument("--region", action="append", default=[], metavar="NAME",
+                     help="e.g. Nordic, Europe, Benelux")
+    p_s.add_argument("--industry", action="append", default=[], metavar="LABEL")
+    p_s.add_argument("--topic", action="append", default=[], metavar="PHRASE",
+                     help="FTS5 topic phrase; repeat for an OR query")
+    p_s.add_argument("--founded-gte", type=int, default=None)
+    p_s.add_argument("--founded-lte", type=int, default=None)
+    p_s.add_argument("--emp-gte", type=int, default=None)
+    p_s.add_argument("--emp-lte", type=int, default=None)
+    p_s.add_argument("--revenue-gte", type=int, default=None, metavar="EUR")
+    p_s.add_argument("--revenue-lte", type=int, default=None, metavar="EUR")
+    p_s.add_argument("--exclude-industry", action="append", default=[], metavar="LABEL")
+    p_s.add_argument("--exclude-keyword", action="append", default=[], metavar="PHRASE")
+    p_s.add_argument("--limit", type=int, default=10)
+    p_s.add_argument("--json", action="store_true")
+    p_s.add_argument("--db", default=ingest_mod.DEFAULT_DB)
+    p_s.set_defaults(func=_cmd_search)
 
     return parser
 

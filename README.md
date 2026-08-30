@@ -52,7 +52,9 @@ grounding checks — is deterministic and testable without the API.
 | Path | What |
 |---|---|
 | `app/ingest.py` | Build `companies.db`: typed columns, region lookup, FTS5 (bm25), manifest. |
-| `app/db.py` | Read-only DB access, `StructuredFilters` → SQL, `count_matching`. |
+| `app/db.py` | Read-only SQLite connection + manifest loader. |
+| `app/schemas.py` | Pydantic tool contracts: `StructuredFilters`, `Exclusions`, `Candidate`, `Company`, `SearchResult`. |
+| `app/tools.py` | `search_companies` / `count_matching` / `get_by_ids` — deterministic, 0 tokens. |
 | `app/revenue.py` | `revenue_range` bucket ↔ euro-interval parsing. |
 | `app/config.py` | Loads `schema_map.yaml` / `regions.yaml` / `lexicon.yaml`; region + industry resolution. |
 | `app/cli.py` | Command-line entry point (the primary test surface). |
@@ -122,6 +124,20 @@ non-traceable and error-prone.
 ### D5 — `schema_map.yaml` indirection for ingestion
 The ingestion layer reads a field-mapping config instead of hard-wiring the eight
 dataset fields, so a differently-shaped source only needs a new mapping.
+
+### D6 — Retrieval tools return a `SearchResult`, not a bare `list[Candidate]`
+`search_companies` returns the ranked candidates **plus** exclusion bookkeeping
+(`matched_filters`, `excluded`, `fts_query`, `truncated`). Q3 must be able to
+report "exclusion criteria matched no candidates" and S3 "removed N" — losing
+those counters in the tool signature would push that logic into the caller.
+Every tool has an explicit Pydantic in/out contract ([app/schemas.py](app/schemas.py))
+and costs **zero tokens** — they are plain SQL.
+
+### D7 — Preferences can never reach a retrieval tool
+`search_companies` only accepts `StructuredFilters` (mandatory) + `topic_terms` +
+`Exclusions`. There is no parameter through which a *preference* (founded-year,
+headcount band) could become a hard filter — preferences are applied later as
+ranking boosts in `validate_and_rank`. Enforced by the type, not by convention.
 
 ---
 

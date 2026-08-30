@@ -9,6 +9,7 @@ description = "Agentic company-search system (Comparables.ai technical assessmen
 requires-python = ">=3.11"
 dependencies = [
     "PyYAML>=6.0",
+    "pydantic>=2.7",
 ]
 
 [project.optional-dependencies]

@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 # Canonical order, smallest first. ``None`` upper bound = open-ended.
 BUCKETS: dict[str, tuple[int, int | None]] = {
@@ -30,9 +31,10 @@ _AMOUNT_RE = re.compile(r"(\d[\d.,]*)\s*(k|m|bn|b)?", re.IGNORECASE)
 _THOUSANDS_RE = re.compile(r"^\d{1,3}(,\d{3})+$")
 
 
-@dataclass(frozen=True)
-class RevenueRange:
+class RevenueRange(BaseModel):
     """A mandate's revenue constraint in euros. ``None`` = unbounded on that side."""
+
+    model_config = ConfigDict(frozen=True)
 
     min_eur: int | None = None
     max_eur: int | None = None
