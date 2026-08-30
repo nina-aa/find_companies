@@ -1,8 +1,15 @@
-# Render.com blueprint. Connect this repo in the Render dashboard (New +
-# -> Blueprint) or "New Web Service" and point it at the Dockerfile.
+# Render.com config reference.
 #
-# Free tier: the service spins down after ~15 min idle -> the next request cold
-# starts in ~30-60 s. 512 MB RAM is enough for this workload.
+# NOTE: deploying via "New -> Blueprint" makes Render ask for a card (a blueprint
+# *could* provision paid resources). To deploy WITHOUT a card, create the service
+# by hand: New -> Web Service -> connect the repo -> Runtime: Docker -> Free.
+# Then set OPENAI_API_KEY and AGENT_API_KEY under Environment. This file just
+# documents the same settings.
+#
+# No `disk:` block and no database -> nothing here provisions paid resources.
+# The SQLite index is baked into the image at build time, so no persistent
+# storage is needed. Free tier spins down after ~15 min idle (~30-60 s cold
+# start); idle RAM ~40 MB against the 512 MB limit.
 services:
   - type: web
     name: agentic-company-search

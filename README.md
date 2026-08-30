@@ -1,13 +1,3 @@
----
-title: Agentic Company Search
-emoji: 🔎
-colorFrom: indigo
-colorTo: blue
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Agentic Company-Search System
 
 A natural-language company mandate → a ranked, evidence-backed shortlist over a
@@ -336,24 +326,26 @@ docker run -p 7860:7860 -e OPENAI_API_KEY=sk-... -e AGENT_API_KEY=secret compara
 curl -s localhost:7860/health
 ```
 
-**Render.com (free tier).** [render.yaml](render.yaml) is a Blueprint for the
-same Dockerfile:
+**Render.com (free tier, no card).** Create the service by hand — the Blueprint
+flow ([render.yaml](render.yaml) is kept as a config reference) asks for a card
+because a blueprint *could* provision paid resources; the manual path does not.
 
-1. Render dashboard → *New → Blueprint* → connect this repo (or *New → Web
-   Service* → Docker).
-2. Add `OPENAI_API_KEY` and `AGENT_API_KEY` under *Environment* (they are
-   `sync: false` in the blueprint, i.e. never committed).
-3. Deploy. Render builds the image (index baked in) and serves at
-   `https://<name>.onrender.com`; `/health` is the health check.
+1. Render dashboard → **New → Web Service** → connect this GitHub repo.
+2. Runtime **Docker** (auto-detected from the Dockerfile — no build/start command
+   to set), instance type **Free**.
+3. Under *Environment*, add `OPENAI_API_KEY` and `AGENT_API_KEY`.
+4. Create. Render builds the image (the 50k index is baked in at build time — no
+   persistent disk needed) and serves at `https://<name>.onrender.com`;
+   `/health` is the health check.
 
-The free instance spins down after ~15 min idle → the next request cold-starts in
-~30–60 s. 512 MB RAM is sufficient.
+The free instance has no persistent storage (fine — the only runtime write is the
+optional LLM response cache) and spins down after ~15 min idle → the next request
+cold-starts in ~30–60 s. Idle RAM is ~40 MB against the 512 MB limit.
 
-**Alternatives.** *Hugging Face Spaces* — the README front-matter already
-declares `sdk: docker`, `app_port: 7860`, so a push to a Docker Space works, but
-HF now gates the Docker SDK behind PRO. *Google Cloud Run*
-(`gcloud run deploy --source .`, scale-to-zero, generous free tier) — card
-required. *Vercel* — analysed and rejected (below).
+**Alternatives.** *Google Cloud Run* (`gcloud run deploy --source .`,
+scale-to-zero, generous free tier) — card required. *Hugging Face Spaces* — a
+push to a Docker Space works, but HF now gates the Docker SDK behind PRO.
+*Vercel* — analysed and rejected (below).
 
 **Vercel — analysed and rejected:** serverless execution-time limits fight a
 bounded-but-slow agent run; no persistent process for run state; ~250 MB bundle
