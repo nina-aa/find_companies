@@ -1,0 +1,166 @@
+# HELD-OUT evaluation set — the 5 required queries from the brief + 2 supplements.
+#
+# Methodology: development iterates against eval/dev_queries.yaml. This file is run
+# once at the end of M3 as a direction check (look, don't tune) and then not again
+# until the final M5 evaluation, so RESULTS.md measures generalisation rather than
+# fitting to these exact strings.
+#
+# Each `expected` block is hand-authored by me — the "correct parse" oracle. Counts
+# in the notes were verified against companies.json with `app.cli db` (Aug 2026):
+#   FI Fintech 580 (304 fraud/banking-analytics topic)
+#   Nordic Energy 1898 (665 energy-forecasting topic)
+#   DE Biotech 637 (219 drug-discovery; 53 of those founded > 2018;
+#                   18 founded >= 2023; 9 founded >= 2024)
+#   DE Energy 614 (193 smart-grid topic)
+#   FI Fintech with employee_count > 5000 -> 0  (max employee_count in the data is 5000)
+#
+# `expected` schema:
+#   mandatory / preferences: countries[] regions[] industries[]
+#                            founded_year{gte,lte} employee_count{gte,lte}
+#                            revenue_eur{gte,lte} capabilities_any[] capabilities_all[]
+#                            serves[]
+#   exclusions: { categories[], keywords[] }
+#   should_revise:   bool   -- metadata.revision.performed must equal this
+#   should_be_empty: bool   -- results == [] with a stated reason (a correct abstention)
+
+Q1:
+  query: >
+    Find fintech companies in Finland working on fraud detection or banking analytics.
+    Prefer companies founded after 2015 with fewer than 250 employees.
+  expected:
+    mandatory:
+      countries: [Finland]
+      industries: [Fintech]
+      capabilities_any: ["fraud detection", "banking analytics"]
+    preferences:
+      founded_year: { gte: 2016 }
+      employee_count: { lte: 249 }
+    exclusions: {}
+    should_revise: false
+    should_be_empty: false
+  notes: >
+    Ranked list. founded_year and employee_count are ranking boosts, NOT filters —
+    a 2014 / 400-employee company may still appear, ranked lower.
+
+Q2:
+  query: >
+    Find Nordic companies working on energy forecasting. Companies must operate in the
+    energy sector. Prefer companies with 50-250 employees, but treat employee count as
+    a preference rather than a mandatory requirement.
+  expected:
+    mandatory:
+      regions: [Nordic]
+      industries: [Energy]
+      capabilities_any: ["energy forecasting"]
+    preferences:
+      employee_count: { gte: 50, lte: 250 }
+    exclusions: {}
+    should_revise: false
+    should_be_empty: false
+  notes: >
+    Nordic = Finland, Norway, Sweden (no Denmark/Iceland in the data). The employee
+    band must not filter.
+
+Q3:
+  query: >
+    Find companies that directly provide fraud-detection technology to European banks.
+    Exclude general cybersecurity consultancies and explain the evidence that each
+    selected company serves financial institutions.
+  expected:
+    mandatory:
+      regions: [Europe]
+      industries: [Fintech]
+      capabilities_any: ["fraud detection"]
+      serves: ["banks", "financial institutions"]
+    preferences: {}
+    exclusions:
+      categories: ["general cybersecurity consultancy"]
+    should_revise: false
+    should_be_empty: false
+  notes: >
+    AMBIGUOUS: "European" is treated as a filter on company location (7 non-USA
+    countries); "directly provides" and "serves banks" are validation-time text
+    judgements, not structured filters. The exclusion ("cybersecurity consultancies")
+    matches NOTHING in this data — there is no Cybersecurity industry — so the response
+    must state "exclusion criteria matched no candidates", not imply it filtered some.
+
+Q4:
+  query: >
+    Identify German drug-discovery companies, preferably founded after 2018. If fewer
+    than three strong matches exist, broaden the founding-year preference, but do not
+    broaden the country or drug-discovery requirements.
+  expected:
+    mandatory:
+      countries: [Germany]
+      industries: [Biotech]
+      capabilities_any: ["drug discovery"]
+    preferences:
+      founded_year: { gte: 2019 }
+    exclusions: {}
+    should_revise: false
+    should_be_empty: false
+  notes: >
+    53 German Biotech "drug discovery" companies founded > 2018 — well over the
+    3-match threshold, so revision should NOT trigger. The revision rule is
+    deterministic (relax_preferences), not an LLM call. S1 exercises the path that
+    Q4 as written does not.
+
+Q5:
+  query: >
+    Find Finnish fintech companies founded after 2022 with more than 5,000 employees
+    and revenue below EUR 10 million.
+  expected:
+    mandatory:
+      countries: [Finland]
+      industries: [Fintech]
+      founded_year: { gte: 2023 }
+      employee_count: { gte: 5001 }
+      revenue_eur: { lte: 10000000 }
+    preferences: {}
+    exclusions: {}
+    should_revise: false
+    should_be_empty: true
+  notes: >
+    Infeasible: max employee_count in the data is 5000. check_feasibility must
+    short-circuit to an empty result + reason after the interpret call only — no
+    validation LLM call. A correct abstention scores as PASS.
+
+# --- supplements: paths the required 5 do not exercise on this dataset ---
+
+S1:
+  query: >
+    Find German drug-discovery companies founded after 2023.
+  expected:
+    mandatory:
+      countries: [Germany]
+      industries: [Biotech]
+      capabilities_any: ["drug discovery"]
+    preferences:
+      founded_year: { gte: 2024 }
+    exclusions: {}
+    should_revise: true
+    should_be_empty: false
+  notes: >
+    Only 18 German Biotech drug-discovery companies founded >= 2023 (9 for >= 2024).
+    The dataset is dense enough that a plain count rarely drops below 3, so the
+    revision trigger fires when the restrictive founded-year preference pushes strong
+    matches out of the validated top-10. Demonstrate deterministically with
+    `--min-results 5` if it does not trip naturally; document "revision is
+    data-limited" either way.
+
+S3:
+  query: >
+    Find energy companies in Germany, but exclude anything working on smart grid.
+  expected:
+    mandatory:
+      countries: [Germany]
+      industries: [Energy]
+    preferences: {}
+    exclusions:
+      keywords: ["smart grid"]
+    should_revise: false
+    should_be_empty: false
+  notes: >
+    614 German Energy companies; 193 mention "smart grid" and must be removed. Unlike
+    Q3's vacuous exclusion, this one actually drops candidates — the response should
+    report how many.

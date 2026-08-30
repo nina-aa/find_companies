@@ -1,0 +1,22 @@
+# Field mapping: raw dataset key -> canonical record field.
+#
+# The ingestion layer reads this instead of hard-wiring the eight fields, so a
+# differently-shaped source file only needs a new mapping here.
+
+source_format: json          # json | jsonl | csv
+id_field: id
+
+fields:
+  id:              { from: id,             type: int,    required: true }
+  name:            { from: name,           type: str,    required: true }
+  description:     { from: description,    type: str,    required: false, default: "" }
+  industry:       { from: industry,       type: str,    required: false }
+  location:       { from: location,       type: str,    required: false }
+  founded_year:   { from: founded_year,   type: int,    required: false }
+  employee_count: { from: employee_count, type: int,    required: false }
+  revenue_range:  { from: revenue_range,  type: str,    required: false }
+
+# Derived fields are computed during ingestion, not read from the source:
+#   region_*          -> from location via regions.yaml (stored as a lookup table)
+#   revenue_min_eur   -> from revenue_range via app.revenue
+#   revenue_max_eur   -> from revenue_range via app.revenue

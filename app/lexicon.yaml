@@ -1,0 +1,91 @@
+# Domain phrase -> {industry, topics}. Deterministic safety net for build_search_plan.
+#
+# The LLM interpret step is the PRIMARY route from natural language to structured
+# criteria. This map is only a fallback: if the model leaves `industries` empty but
+# the mandate clearly names a domain term, build_search_plan fills it in from here,
+# and it seeds `topic_terms` for the FTS5 query.
+#
+# `industry: null` means the phrase is a topic with no industry of its own (it may be
+# an exclusion target, e.g. "cybersecurity" — there is no Cybersecurity industry).
+#
+# Industry values MUST be one of the 10 in companies.json:
+#   Fintech Energy Biotech Healthcare Telecom Technology Logistics Education Retail Automotive
+
+phrases:
+  # --- Fintech ---
+  "fintech":              { industry: Fintech,    topics: [] }
+  "financial technology": { industry: Fintech,    topics: [] }
+  "fraud detection":      { industry: Fintech,    topics: ["fraud detection"] }
+  "banking analytics":    { industry: Fintech,    topics: ["banking analytics"] }
+  "digital banking":      { industry: Fintech,    topics: ["digital banking"] }
+  "payments":             { industry: Fintech,    topics: ["payments"] }
+  "lending":              { industry: Fintech,    topics: ["lending"] }
+  "risk assessment":      { industry: Fintech,    topics: ["risk assessment"] }
+  "risk scoring":         { industry: Fintech,    topics: ["risk assessment"] }
+
+  # --- Energy ---
+  "energy sector":        { industry: Energy,     topics: [] }
+  "energy":               { industry: Energy,     topics: [] }
+  "energy forecasting":   { industry: Energy,     topics: ["energy forecasting", "forecasting"] }
+  "renewable energy":     { industry: Energy,     topics: ["renewable energy"] }
+  "smart grid":           { industry: Energy,     topics: ["smart grid"] }
+  "grid optimization":    { industry: Energy,     topics: ["smart grid"] }
+
+  # --- Biotech ---
+  "biotech":              { industry: Biotech,    topics: [] }
+  "biotechnology":        { industry: Biotech,    topics: [] }
+  "drug discovery":       { industry: Biotech,    topics: ["drug discovery"] }
+  "drug-discovery":       { industry: Biotech,    topics: ["drug discovery"] }
+  "gene editing":         { industry: Biotech,    topics: ["gene editing"] }
+  "molecular analysis":   { industry: Biotech,    topics: ["molecular analysis"] }
+
+  # --- Healthcare ---
+  "healthcare":           { industry: Healthcare, topics: [] }
+  "health care":          { industry: Healthcare, topics: [] }
+  "diagnostics":          { industry: Healthcare, topics: ["diagnostics"] }
+  "patient monitoring":   { industry: Healthcare, topics: ["patient monitoring"] }
+  "health data":          { industry: Healthcare, topics: ["health data"] }
+
+  # --- Telecom ---
+  "telecom":              { industry: Telecom,    topics: [] }
+  "telecommunications":   { industry: Telecom,    topics: [] }
+  "network optimization": { industry: Telecom,    topics: ["network optimization"] }
+  "5g analytics":         { industry: Telecom,    topics: ["5G analytics"] }
+  "5g":                   { industry: Telecom,    topics: ["5G analytics"] }
+
+  # --- Technology ---
+  "technology":           { industry: Technology, topics: [] }
+  "software":             { industry: Technology, topics: [] }
+  "cloud infrastructure": { industry: Technology, topics: ["cloud infrastructure"] }
+  "data pipelines":       { industry: Technology, topics: ["data pipelines"] }
+  "observability":        { industry: Technology, topics: ["observability"] }
+
+  # --- Logistics ---
+  "logistics":            { industry: Logistics,  topics: [] }
+  "supply chain":         { industry: Logistics,  topics: ["supply chain visibility"] }
+  "supply chain visibility": { industry: Logistics, topics: ["supply chain visibility"] }
+  "route optimization":   { industry: Logistics,  topics: ["route optimization"] }
+  "demand forecasting":   { industry: Logistics,  topics: ["demand forecasting"] }
+  "inventory planning":   { industry: Logistics,  topics: ["inventory planning"] }
+
+  # --- Education ---
+  "education":            { industry: Education,  topics: [] }
+  "edtech":               { industry: Education,  topics: [] }
+  "personalized learning": { industry: Education, topics: ["personalized learning"] }
+  "student analytics":    { industry: Education,  topics: ["student analytics"] }
+
+  # --- Retail ---
+  "retail":               { industry: Retail,     topics: [] }
+  "e-commerce":           { industry: Retail,     topics: [] }
+  "ecommerce":            { industry: Retail,     topics: [] }
+  "pricing optimization": { industry: Retail,     topics: ["pricing optimization"] }
+
+  # --- Automotive ---
+  "automotive":           { industry: Automotive, topics: [] }
+  "autonomous driving":   { industry: Automotive, topics: ["autonomous driving"] }
+  "self-driving":         { industry: Automotive, topics: ["autonomous driving"] }
+  "vehicle telemetry":    { industry: Automotive, topics: ["vehicle telemetry"] }
+
+  # --- topics with no industry of their own (exclusion targets etc.) ---
+  "cybersecurity":        { industry: null,       topics: ["cybersecurity"] }
+  "cyber security":       { industry: null,       topics: ["cybersecurity"] }

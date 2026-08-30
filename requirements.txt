@@ -1,0 +1,12 @@
+# Runtime
+PyYAML>=6.0
+
+# --- added in later milestones ---
+# pydantic>=2.7        (M3 — structured schemas)
+# openai>=1.40         (M3 — LLM client)
+# structlog>=24.1      (M4 — observability)
+# fastapi>=0.111       (M4 — HTTP API)
+# uvicorn>=0.30        (M4 — HTTP API)
+
+# Dev / test
+pytest>=8.0

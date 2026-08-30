@@ -1,0 +1,26 @@
+# --- assessment working files (never committed to the submission repo) ---
+PLAN.md
+jd.txt
+input.txt
+lessons.md
+
+# --- secrets ---
+.env
+
+# --- build artefacts ---
+data/index/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# --- editor / tooling ---
+.vscode/
+.idea/
+.DS_Store
+.claude/

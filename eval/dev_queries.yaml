@@ -1,0 +1,102 @@
+# Development query set — self-authored, used for ALL iteration in M3–M4.
+#
+# The 5 required queries (+ S1/S3) in queries.yaml are HELD OUT: run them once at the
+# end of M3 as a direction check (look, don't tune), then not again until the final
+# M5 evaluation. This set carries the development load so the final RESULTS.md numbers
+# reflect generalisation, not fitting to the required strings.
+#
+# Each entry has a `purpose` (which capability it exercises + rough expectation), not a
+# full `expected` block — flesh those out only if you want assertions during dev.
+# Counts below were checked against companies.json (Aug 2026); re-verify with
+# `app.cli db "SELECT ..."` if the file changes.
+
+D1:
+  query: >
+    Find automotive companies in Germany working on autonomous driving or vehicle
+    telemetry. Prefer companies founded after 2015 with fewer than 500 employees.
+  purpose: >
+    Q1-shape. Structured (country + industry) + qualitative topic OR + two soft
+    preferences. Large pool (~648) → ranked list, no revision. Check that founded-year
+    and headcount act as ranking boosts, not filters.
+
+D2:
+  query: >
+    Find Benelux companies in the logistics sector focused on supply chain visibility.
+    Ideally 100-500 employees, but treat headcount as a preference, not a hard filter.
+  purpose: >
+    Q2-shape. Region resolution (Benelux -> Netherlands). Mandatory industry. The
+    employee band must NOT filter — a company with 40 or 900 employees can still be
+    returned, just ranked lower. Pool ~328.
+
+D3:
+  query: >
+    Identify healthcare companies in France working on patient monitoring or diagnostics,
+    but exclude anything that is primarily a general health-data platform.
+  purpose: >
+    Q3-shape with a NON-vacuous exclusion. FR healthcare pool ~594; ~392 do patient
+    monitoring / diagnostics; ~202 do "health data" and should be excluded. Check the
+    response states what the exclusion removed and gives evidence for the topic match.
+
+D4:
+  query: >
+    Find Norwegian biotech companies working on gene editing, preferably founded after
+    2023.
+  purpose: >
+    Revision path. Small qualifying pool (~10 gene-editing NO biotech founded >=2023,
+    ~5 for >=2024). If fewer than `min_results` strong matches on the first pass,
+    `relax_preferences` widens the founding year. Revision rarely trips naturally on
+    this dense dataset — use `--min-results 5` to demonstrate it deliberately.
+
+D5:
+  query: >
+    Find Swedish automotive companies founded after 2023 with more than 3,000 employees
+    and revenue below EUR 1 million.
+  purpose: >
+    Q5-shape, empty / conflicting. Structurally impossible in the data — no company
+    pairs >3,000 employees with a bottom revenue bucket. `check_feasibility` should
+    return `results: []` + reason after only the interpret call (no validation call).
+
+D6:
+  query: >
+    Which companies in Germany and France are working on renewable energy or smart grid?
+    Lean towards smaller, newer firms.
+  purpose: >
+    Tests that "Germany and France" is read as set membership
+    (location IN [Germany, France]), NOT an impossible conjunction
+    (country == Germany AND country == France) — a common NL trap. Also: "smaller,
+    newer" is underspecified → interpret as soft preferences (low employee_count,
+    recent founded_year) or record as an ambiguity. Pool ~831 → ranked list.
+
+D7:
+  query: >
+    Find European technology companies with annual revenue below EUR 10 million that work
+    on cloud infrastructure.
+  purpose: >
+    Revenue-bucket parsing ("below EUR 10M" -> buckets 0-1M + 1M-10M). "European" ->
+    the 7 non-USA countries. Small real pool (~12) → the result count sits near the
+    bottom; check the system returns the few real matches and does not pad to 10.
+
+D8:
+  query: >
+    Find UK fintech companies working on payments, lending, or fraud detection.
+  purpose: >
+    Clean happy path. Large pool (~428), three-way capability OR, no preferences, no
+    revision. Use this one to judge ranking quality and evidence-span grounding.
+
+D9:
+  query: >
+    Identify US telecom companies founded between 2005 and 2015 that work on network
+    optimization or 5G analytics.
+  purpose: >
+    Two-sided founded-year filter (gte 2005 AND lte 2015). Topic OR within Telecom.
+    Pool ~242. Check both year bounds are applied.
+
+D10:
+  query: >
+    I'm looking for innovative logistics startups in Scandinavia.
+  purpose: >
+    Underspecified intent. Scandinavia -> (Norway, Sweden); Logistics is the only clear
+    structured constraint (~1260). "innovative startups" has no structured field → the
+    system should infer soft preferences (recent founding, small size) or surface the
+    vagueness as an ambiguity, and still return something sensible rather than erroring
+    or returning nothing.

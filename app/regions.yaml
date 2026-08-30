@@ -1,0 +1,56 @@
+# Region term -> concrete country list, resolved deterministically (never by the LLM).
+#
+# Only the 8 countries that actually occur in companies.json can appear here:
+#   Finland, Germany, France, Norway, Sweden, Netherlands, USA, UK
+#
+# An empty list means "the region is a real concept but no company in the data
+# sits in it" -> the mandate is structurally infeasible (handled like Q5).
+# A term absent from this map is recorded as an ambiguity; the system never guesses.
+
+countries:
+  - Finland
+  - Germany
+  - France
+  - Norway
+  - Sweden
+  - Netherlands
+  - USA
+  - UK
+
+regions:
+  nordic:        [Finland, Norway, Sweden]            # Denmark, Iceland absent from data
+  nordics:       [Finland, Norway, Sweden]
+  scandinavia:   [Norway, Sweden]
+  scandinavian:  [Norway, Sweden]
+  europe:        [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
+  european:      [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
+  eu:            [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
+  eea:           [Finland, Germany, France, Norway, Sweden, Netherlands, UK]
+  "continental europe": [Germany, France, Netherlands]
+  dach:          [Germany]                             # Austria, Switzerland absent
+  benelux:       [Netherlands]                         # Belgium, Luxembourg absent
+  baltics:       []                                    # none in data -> infeasible
+  baltic:        []
+  "north america": [USA]
+  "northern europe": [Finland, Norway, Sweden, Netherlands, UK]
+
+# Country synonyms / demonyms -> canonical country name in the data.
+country_aliases:
+  finnish:      Finland
+  german:       Germany
+  french:       France
+  norwegian:    Norway
+  swedish:      Sweden
+  dutch:        Netherlands
+  "the netherlands": Netherlands
+  holland:      Netherlands
+  american:     USA
+  "united states": USA
+  "u.s.":       USA
+  "u.s.a.":     USA
+  us:           USA
+  britain:      UK
+  "great britain": UK
+  "united kingdom": UK
+  british:      UK
+  english:      UK
