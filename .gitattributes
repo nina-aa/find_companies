@@ -1,0 +1,6 @@
+# Keep the data files byte-stable (no CRLF/LF conversion, no diff noise).
+data/companies.json  -text -diff
+data/companies.csv   -text -diff
+
+# Normalise everything else to LF.
+* text=auto eol=lf

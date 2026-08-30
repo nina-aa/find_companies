@@ -1,0 +1,24 @@
+# build artefacts — rebuilt inside the image
+data/index/
+data/cache/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# not needed at runtime
+tests/
+.git/
+.github/
+.vscode/
+.idea/
+
+# assessment working files — must never ship
+PLAN.md
+jd.txt
+input.txt
+lessons.md
+.env
+
+# docs that aren't the runtime
+*.md
+!README.md

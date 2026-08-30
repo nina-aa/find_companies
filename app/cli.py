@@ -235,15 +235,22 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     os.environ.setdefault("LOG_LEVEL", "WARNING")
     cfg = RunConfig(provider="fake" if args.fake else args.provider,
                     use_cache=not args.no_cache)
+    from pathlib import Path
+    queries_path = Path(args.queries) if args.queries else QUERIES_PATH
     results = run_eval(
         query_ids=args.id or None,
         cfg=cfg,
-        queries_path=args.queries or QUERIES_PATH,
+        queries_path=queries_path,
         db_path=args.db,
     )
     report = render_report(results)
-    out = args.out or RESULTS_PATH
-    __import__("pathlib").Path(out).write_text(report, encoding="utf-8")
+    if args.out:
+        out = Path(args.out)
+    elif queries_path == QUERIES_PATH:
+        out = RESULTS_PATH
+    else:                       # non-canonical query set -> don't clobber RESULTS.md
+        out = queries_path.parent / f"RESULTS_{queries_path.stem}.md"
+    out.write_text(report, encoding="utf-8")
 
     for r in results:
         verdict = "PASS" if r.ok else "FAIL"

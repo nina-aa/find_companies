@@ -41,6 +41,10 @@ Q1:
   notes: >
     Ranked list. founded_year and employee_count are ranking boosts, NOT filters —
     a 2014 / 400-employee company may still appear, ranked lower.
+  judgment: >
+    Ranking defensible: the only company matching BOTH topics (240 emp, 2018) ranks #1;
+    firms failing the <250 / >2015 preferences drop below via preference_score. One clean
+    verbatim span per topic. No revision, as expected.
 
 Q2:
   query: >
@@ -60,6 +64,10 @@ Q2:
   notes: >
     Nordic = Finland, Norway, Sweden (no Denmark/Iceland in the data). The employee
     band must not filter.
+  judgment: >
+    All rows are Nordic Energy with an 'energy forecasting' span. The 50-250 band correctly
+    does not filter. relevance_score is flat (model weakness) so intra-tier order is bm25 +
+    preference_score.
 
 Q3:
   query: >
@@ -83,6 +91,11 @@ Q3:
     judgements, not structured filters. The exclusion ("cybersecurity consultancies")
     matches NOTHING in this data — there is no Cybersecurity industry — so the response
     must state "exclusion criteria matched no candidates", not imply it filtered some.
+  judgment: >
+    Exclusion correctly matches nothing and is reported as such. Every candidate is European
+    Fintech with a fraud-detection span, but 'serves European banks' is not in the one-
+    sentence descriptions, so all come back 'partial' with that gap labelled inference - the
+    correct ceiling given the source.
 
 Q4:
   query: >
@@ -104,6 +117,10 @@ Q4:
     3-match threshold, so revision should NOT trigger. The revision rule is
     deterministic (relax_preferences), not an LLM call. S1 exercises the path that
     Q4 as written does not.
+  judgment: >
+    53 German Biotech drug-discovery firms founded >2018 exist, so no revision (correct).
+    After the deterministic pool re-rank the returned list is all founded >=2019 - the
+    founding-year preference is respected without ever filtering.
 
 Q5:
   query: >
@@ -124,6 +141,10 @@ Q5:
     Infeasible: max employee_count in the data is 5000. check_feasibility must
     short-circuit to an empty result + reason after the interpret call only — no
     validation LLM call. A correct abstention scores as PASS.
+  judgment: >
+    Correct abstention: employee_count max is 5000. Feasibility short-circuits after the
+    interpret call only (1 LLM call, no validation spend) and returns an empty list with the
+    failing criteria named.
 
 # --- supplements: paths the required 5 do not exercise on this dataset ---
 
@@ -149,6 +170,10 @@ S1:
     which scripts an empty first validation pass). This query is kept as a tight
     real-data filter (few GE Biotech founded >= 2024 with < 50 staff) that should
     still return a small non-empty list without padding.
+  judgment: >
+    Tight real-data filter (German Biotech gene-editing founded >=2021, ~22 rows). Returns a
+    non-empty ranked list without padding beyond the real pool; spans are clean gene-editing
+    quotes.
 
 S3:
   query: >
@@ -166,3 +191,7 @@ S3:
     614 German Energy companies; 193 mention "smart grid" and must be removed. Unlike
     Q3's vacuous exclusion, this one actually drops candidates — the response should
     report how many.
+  judgment: >
+    Non-vacuous exclusion: ~193 of 614 German Energy firms mention 'smart grid' and are
+    removed, and the response reports the count. Remaining candidates are German Energy with
+    no smart-grid in the text.

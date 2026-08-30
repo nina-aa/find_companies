@@ -100,3 +100,85 @@ D10:
     system should infer soft preferences (recent founding, small size) or surface the
     vagueness as an ambiguity, and still return something sensible rather than erroring
     or returning nothing.
+
+# --- bare-topic queries (no country/size/date filters) — interpretation stress tests ---
+
+D11:
+  query: cybercrime prevention
+  purpose: >
+    Domain term absent from the taxonomy. No "Cybersecurity" industry exists; the
+    closest real capability is fraud detection. Lexicon maps "cybercrime" ->
+    {Fintech, fraud detection}. Check the system does NOT return WHERE 1 over all
+    50k rows, and that the topic FTS lands on fraud-detection companies.
+
+D12:
+  query: supply chain optimisation
+  purpose: >
+    British spelling ("optimisation"). Must normalise to reach the lexicon
+    ("supply chain" -> {Logistics, supply chain visibility}). Verifies -isation ->
+    -ization handling and single-topic bare query -> ranked Logistics list.
+
+D13:
+  query: Personalised learning
+  purpose: >
+    British spelling of a topic that IS in the data ("personalized learning",
+    Education). "personalised" must normalise to "personalized" or the lexicon and
+    FTS both miss. Large pool (~2586) -> ranked list.
+
+D14:
+  query: Personalized medicine
+  purpose: >
+    Plausible domain term NOT literally in the templated descriptions. Lexicon maps
+    "personalized medicine" -> {Biotech, drug discovery + molecular analysis} as the
+    nearest real capabilities. Check it degrades to a sensible Biotech list rather
+    than returning nothing, and that semantic_focus records the original intent.
+
+D15:
+  query: AI companies in Europe
+  purpose: >
+    "AI" is not an industry and every description starts with "AI-powered". Should
+    resolve region=Europe (7 non-USA countries) and record "AI" as an ambiguity or
+    ignore it, NOT invent an industry. Nearly the whole European set is feasible →
+    the ranking has to carry the whole result quality.
+
+D16:
+  query: fast-growing profitable companies
+  purpose: >
+    Zero structured signal, zero topic. "profitable" ~ high revenue bucket;
+    "fast-growing" has no field. Expect heavy ambiguity list and either a broad
+    ranked list or a request for narrowing — must not error or fabricate filters.
+
+D17:
+  query: >
+    German or Dutch automotive companies working on self-driving or vehicle
+    telemetry, but not ones that only do mapping.
+  purpose: >
+    "German or Dutch" -> {Germany, Netherlands} set membership; "self-driving" is a
+    synonym for autonomous driving; exclusion "mapping" is a non-vacuous keyword
+    gate. Two-country + topic-OR + real exclusion in one query.
+
+D18:
+  query: >
+    renewable energy companies in the Nordics founded before 2005 with over 1000
+    employees
+  purpose: >
+    Upper-bounded founded_year (lte 2004) + lower-bounded employee_count (gte 1001)
+    as MANDATORY (no hedge words). Region Nordic. Checks that "before"/"over" map to
+    the right bound directions and that both are hard filters, not preferences.
+
+D19:
+  query: healthcare and fintech companies in France
+  purpose: >
+    "healthcare and fintech" over the industry list = set membership
+    (industry IN [Healthcare, Fintech]), NOT an impossible AND on one column.
+    Location France. Pool is large; the point is the industries[] parse.
+
+D20:
+  query: >
+    Show me logistics companies in Sweden that do route optimization; skip the
+    tiny ones and anything older than 20 years.
+  purpose: >
+    Colloquial phrasing. "skip the tiny ones" -> soft/loose employee preference or
+    ambiguity; "older than 20 years" -> founded_year_gte ~2005 (relative-to-now).
+    Sweden + Logistics + route optimization topic. Tests relative date handling and
+    vague-size phrasing.

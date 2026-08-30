@@ -44,3 +44,30 @@ def test_lookup_prefers_longer_phrases_first():
 
 def test_no_match_returns_empty():
     assert config.lookup_phrases("a completely unrelated sentence about weather") == []
+
+
+@pytest.mark.parametrize(
+    "british, american",
+    [
+        ("supply chain optimisation", "supply chain optimization"),
+        ("Personalised learning", "personalized learning"),
+        ("analyse the data", "analyze the data"),
+        ("customised platform", "customized platform"),
+    ],
+)
+def test_normalise_spelling(british, american):
+    assert config.normalise_spelling(british.lower()) == american
+
+
+@pytest.mark.parametrize(
+    "phrase, industry",
+    [
+        ("Personalised learning", "Education"),          # british spelling
+        ("supply chain optimisation", "Logistics"),      # british + generic tail
+        ("cybercrime prevention", "Fintech"),            # synonym -> fraud detection
+        ("precision medicine", "Biotech"),               # synonym
+    ],
+)
+def test_lexicon_handles_spelling_and_synonyms(phrase, industry):
+    hits = config.lookup_phrases(phrase)
+    assert any(h.industry == industry for h in hits), (phrase, [h.phrase for h in hits])

@@ -1,12 +1,12 @@
 # Runtime
 PyYAML>=6.0
-pydantic>=2.7          # tool contracts (M2), LLM response schemas (M3)
-openai>=1.40           # LLM client (M3); only used when --provider openai
-langgraph>=1.0         # workflow graph engine (M4); custom driver is the fallback
-fastapi>=0.111         # HTTP API (M4)
-uvicorn>=0.30          # ASGI server (M4)
+pydantic>=2.7,<3
+openai>=1.40                 # tested on 1.108 (local) and 3.6 (image); parse() is stable
+langgraph>=1.0,<2
+fastapi>=0.111
+uvicorn>=0.30
 # observability uses the stdlib logging module — no dependency
 
 # Dev / test
 pytest>=8.0
-httpx>=0.27            # FastAPI TestClient
+httpx>=0.27                  # FastAPI TestClient

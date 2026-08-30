@@ -196,7 +196,14 @@ def run_eval(
     cfg = cfg or RunConfig(provider="openai", use_cache=True)
     specs = yaml.safe_load(Path(queries_path).read_text(encoding="utf-8"))
     ids = query_ids or list(specs)
-    return [evaluate_query(qid, specs[qid], cfg, db_path) for qid in ids if qid in specs]
+    out = []
+    for qid in ids:
+        if qid not in specs:
+            continue
+        qr = evaluate_query(qid, specs[qid], cfg, db_path)
+        qr.note = (specs[qid].get("judgment") or "").strip()
+        out.append(qr)
+    return out
 
 
 def render_report(results: list[QueryResult]) -> str:
@@ -212,13 +219,16 @@ def render_report(results: list[QueryResult]) -> str:
                      f"{'yes' if r.revised else '—'} | {r.llm_calls} | "
                      f"{r.est_cost_usd:.5f} | {r.latency_ms} |")
     lines.append("")
-    lines.append("## Per-check detail")
+    lines.append("## Per-query detail")
     for r in results:
         lines.append(f"\n### {r.qid}")
         for ch in r.checks:
             mark = "✅" if ch.passed else "❌"
             lines.append(f"- {mark} {ch.name}" + (f" — {ch.detail}" if ch.detail else ""))
+        if r.note:
+            lines.append(f"\n**Judgment (manual):** {r.note}")
     lines.append("")
     lines.append("_Ranking quality, exclusion correctness and evidence *sufficiency* "
-                 "are judgment columns — reviewed by hand, not scored here._")
+                 "are judgment calls — the **Judgment (manual)** notes above, not "
+                 "auto-scored._")
     return "\n".join(lines) + "\n"

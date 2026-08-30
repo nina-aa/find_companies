@@ -127,6 +127,32 @@ def canonical_industry(value: str) -> str | None:
     return _INDUSTRY_BY_LOWER.get(value.strip().lower())
 
 
+import re as _re
+
+# British -> American spelling for the -ise/-yse families only (safe: no false
+# positives on real words). Covers "optimisation", "personalised", "analyse", …
+_SPELLING_SUBS = [
+    (_re.compile(r"isation\b"), "ization"),
+    (_re.compile(r"isations\b"), "izations"),
+    (_re.compile(r"ise\b"), "ize"),
+    (_re.compile(r"ised\b"), "ized"),
+    (_re.compile(r"ising\b"), "izing"),
+    (_re.compile(r"iser\b"), "izer"),
+    (_re.compile(r"yse\b"), "yze"),
+    (_re.compile(r"ysed\b"), "yzed"),
+    (_re.compile(r"ysing\b"), "yzing"),
+]
+
+
+def normalise_spelling(text: str) -> str:
+    """Normalise British -ise/-yse spellings to American so lexicon and FTS
+    lookups match ("supply chain optimisation" -> "...optimization")."""
+    out = text
+    for pattern, repl in _SPELLING_SUBS:
+        out = pattern.sub(repl, out)
+    return out
+
+
 @dataclass(frozen=True)
 class LexiconHit:
     phrase: str
@@ -150,8 +176,9 @@ def lexicon() -> dict[str, LexiconHit]:
 
 
 def lookup_phrases(text: str) -> list[LexiconHit]:
-    """Every lexicon phrase that occurs as a substring of ``text`` (longest first)."""
-    lowered = text.lower()
+    """Every lexicon phrase that occurs as a substring of ``text`` (longest first).
+    Spelling is normalised first so British forms still match."""
+    lowered = normalise_spelling(text.lower())
     hits = [hit for key, hit in lexicon().items() if key in lowered]
     hits.sort(key=lambda h: len(h.phrase), reverse=True)
     return hits

@@ -16,6 +16,9 @@ phrases:
   "fintech":              { industry: Fintech,    topics: [] }
   "financial technology": { industry: Fintech,    topics: [] }
   "fraud detection":      { industry: Fintech,    topics: ["fraud detection"] }
+  "fraud prevention":     { industry: Fintech,    topics: ["fraud detection"] }
+  "cybercrime":           { industry: Fintech,    topics: ["fraud detection"] }
+  "financial crime":      { industry: Fintech,    topics: ["fraud detection"] }
   "banking analytics":    { industry: Fintech,    topics: ["banking analytics"] }
   "digital banking":      { industry: Fintech,    topics: ["digital banking"] }
   "payments":             { industry: Fintech,    topics: ["payments"] }
@@ -36,8 +39,13 @@ phrases:
   "biotechnology":        { industry: Biotech,    topics: [] }
   "drug discovery":       { industry: Biotech,    topics: ["drug discovery"] }
   "drug-discovery":       { industry: Biotech,    topics: ["drug discovery"] }
+  "drug development":     { industry: Biotech,    topics: ["drug discovery"] }
   "gene editing":         { industry: Biotech,    topics: ["gene editing"] }
+  "gene therapy":         { industry: Biotech,    topics: ["gene editing"] }
+  "crispr":               { industry: Biotech,    topics: ["gene editing"] }
   "molecular analysis":   { industry: Biotech,    topics: ["molecular analysis"] }
+  "precision medicine":   { industry: Biotech,    topics: ["drug discovery", "molecular analysis"] }
+  "personalized medicine": { industry: Biotech,   topics: ["drug discovery", "molecular analysis"] }
 
   # --- Healthcare ---
   "healthcare":           { industry: Healthcare, topics: [] }

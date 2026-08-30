@@ -174,7 +174,7 @@ def _normalise_topics(terms, notes: list[str]) -> tuple[list[str], list[str]]:
     topics: list[str] = []
     industries: list[str] = []
     for raw in terms:
-        term = (raw or "").strip()
+        term = config.normalise_spelling((raw or "").strip())
         if not term:
             continue
         words = term.split()
