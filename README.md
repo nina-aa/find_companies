@@ -336,21 +336,24 @@ docker run -p 7860:7860 -e OPENAI_API_KEY=sk-... -e AGENT_API_KEY=secret compara
 curl -s localhost:7860/health
 ```
 
-**Hugging Face Spaces (Docker SDK).** This repo is a valid Space: the README
-front-matter declares `sdk: docker`, `app_port: 7860`. Deploy:
+**Render.com (free tier).** [render.yaml](render.yaml) is a Blueprint for the
+same Dockerfile:
 
-1. Create a **Docker** Space on huggingface.co (Blank template).
-2. In *Settings → Variables and secrets*, add `OPENAI_API_KEY` and `AGENT_API_KEY`.
-3. Push this repo to the Space's git remote:
-   ```bash
-   git remote add space https://huggingface.co/spaces/<user>/<space>
-   git push space HEAD:main
-   ```
-   The Space builds the Dockerfile and serves the API at the public URL.
+1. Render dashboard → *New → Blueprint* → connect this repo (or *New → Web
+   Service* → Docker).
+2. Add `OPENAI_API_KEY` and `AGENT_API_KEY` under *Environment* (they are
+   `sync: false` in the blueprint, i.e. never committed).
+3. Deploy. Render builds the image (index baked in) and serves at
+   `https://<name>.onrender.com`; `/health` is the health check.
 
-Free Spaces sleep after inactivity → a cold start on the next request; the
-torch-free image keeps that short. **Documented alternative:** Google Cloud Run
-(`gcloud run deploy --source .`, scale-to-zero) — card required.
+The free instance spins down after ~15 min idle → the next request cold-starts in
+~30–60 s. 512 MB RAM is sufficient.
+
+**Alternatives.** *Hugging Face Spaces* — the README front-matter already
+declares `sdk: docker`, `app_port: 7860`, so a push to a Docker Space works, but
+HF now gates the Docker SDK behind PRO. *Google Cloud Run*
+(`gcloud run deploy --source .`, scale-to-zero, generous free tier) — card
+required. *Vercel* — analysed and rejected (below).
 
 **Vercel — analysed and rejected:** serverless execution-time limits fight a
 bounded-but-slow agent run; no persistent process for run state; ~250 MB bundle

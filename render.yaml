@@ -1,0 +1,24 @@
+# Render.com blueprint. Connect this repo in the Render dashboard (New +
+# -> Blueprint) or "New Web Service" and point it at the Dockerfile.
+#
+# Free tier: the service spins down after ~15 min idle -> the next request cold
+# starts in ~30-60 s. 512 MB RAM is enough for this workload.
+services:
+  - type: web
+    name: agentic-company-search
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY      # set in the Render dashboard (Environment)
+        sync: false
+      - key: AGENT_API_KEY       # set in the Render dashboard; give this to evaluators
+        sync: false
+      - key: LLM_PROVIDER
+        value: openai
+      - key: AGENT_DEADLINE_S
+        value: "90"
+      - key: LOG_LEVEL
+        value: INFO
