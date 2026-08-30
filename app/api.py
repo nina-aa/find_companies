@@ -40,6 +40,15 @@ def _check_key(x_api_key: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
 
 
+@app.get("/")
+def root() -> dict:
+    return {
+        "service": "agentic company search",
+        "endpoints": {"POST /agent/search": "run a mandate", "GET /health": "index status",
+                      "GET /docs": "OpenAPI UI"},
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     from app.db import load_manifest
