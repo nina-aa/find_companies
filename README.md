@@ -316,6 +316,16 @@ present).
 
 ## Deployment
 
+**Live:** `https://find-companies.onrender.com` (Render free tier — first request
+after ~15 min idle cold-starts in ~30–60 s). `/docs` for the OpenAPI UI.
+
+```bash
+curl -s https://find-companies.onrender.com/health
+curl -s -X POST https://find-companies.onrender.com/agent/search \
+  -H 'X-API-Key: <key provided separately>' -H 'content-type: application/json' \
+  -d '{"query":"German drug-discovery companies preferably founded after 2018"}'
+```
+
 **Docker, self-contained.** `python -m app.ingest` runs at image-build time, so
 the container carries the 50k index and starts instantly. Runs as a non-root user
 on port 7860.

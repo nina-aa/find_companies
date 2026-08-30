@@ -1,8 +1,10 @@
 # --- assessment working files (never committed to the submission repo) ---
 PLAN.md
+dumbplan.md
 jd.txt
 input.txt
 lessons.md
+data/companies.csv     # unused duplicate of companies.json
 
 # --- secrets ---
 .env
