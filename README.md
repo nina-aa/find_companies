@@ -3,17 +3,38 @@
 A natural-language company mandate → a ranked, evidence-backed shortlist over a
 50,000-row synthetic company dataset.
 
-The system is a **deterministic workflow**, not an autonomous agent: seven nodes,
-of which exactly two make a single schema-constrained LLM call each; every routing
-decision is made by Python, never by a model.
+It's a **deterministic workflow**, not an autonomous agent: seven nodes, two of
+which make one schema-constrained LLM call each. Every routing decision, filter,
+score and bound is Python — the model parses the request and judges text, and
+that's all it does.
 
 ```
 interpret_mandate ─► build_search_plan ─► check_feasibility ─► retrieve ─► validate_and_rank ─► compose_response
-   (LLM #1)            (deterministic)      (deterministic)     (tools)      (LLM #2/#3)          (deterministic)
-                                                 │                              │
-                              0 mandatory matches ┘      too few valid results ─┘─► relax_preferences ─► retrieve …
-                                 → empty + reason         (≤1 revision, deterministic ladder; rare on dense data)
+   (LLM)              (code)               (code)              (tools)     (LLM)                (code)
+                                                │                            │
+                             0 mandatory matches ┘      too few results ─────┘─► relax_preferences ─► retrieve …
+                                → empty + reason         (≤1 revision; rarely triggers on this dense data)
 ```
+
+---
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `app/ingest.py` · `app/profile_dataset.py` | build `companies.db` (typed columns, FTS5, region lookup, manifest) · profile the data → `PROFILE.md` + `dataset_vocab.json` |
+| `app/tools.py` · `app/schemas.py` | the three retrieval tools + their Pydantic contracts |
+| `app/llm.py` · `app/prompts.py` | `LLMClient` + providers + cache · the two prompt builders |
+| `app/state.py` · `app/nodes.py` | all schemas + `RunState` · the 7 nodes as `RunState → RunState` |
+| `app/budget.py` · `app/workflow.py` · `app/graph.py` | `BudgetGuard` · the driver engine · the LangGraph engine |
+| `app/api.py` · `app/cli.py` · `app/logging.py` | FastAPI · CLI · structured JSON logging |
+| `app/evaluate.py` | the evaluation harness → `eval/RESULTS.md` |
+| `app/config.py` · `app/*.yaml` | deterministic taxonomy: regions, lexicon, schema map |
+| `eval/queries.yaml` · `eval/dev_queries.yaml` | scored set (with `expected`) · dev iteration set |
+| `tests/` | 207 offline tests (fake provider + a fixture index) + opt-in live smoke |
+
+CLI: `ingest` · `db "<sql>"` · `search` (tools, no LLM) · `check` (interpret +
+plan + feasibility) · `run` · `eval`.
 
 ---
 
@@ -37,7 +58,7 @@ HTTP API:
 ```bash
 uvicorn app.api:app --port 8000
 curl -s -X POST localhost:8000/agent/search \
-  -H 'X-API-Key: <AGENT_API_KEY>' -H 'content-type: application/json' \
+  -H 'content-type: application/json' \
   -d '{"query":"UK fintech doing payments or lending"}'
 ```
 
@@ -45,218 +66,303 @@ Docker (self-contained — builds the index at image-build time):
 
 ```bash
 docker build -t compara-search .
-docker run -p 7860:7860 -e OPENAI_API_KEY=sk-... -e AGENT_API_KEY=secret compara-search
+docker run -p 7860:7860 -e OPENAI_API_KEY=sk-... compara-search
 ```
 
 ---
+## Deployment
 
-## The dataset, and what it forces
+**Docker, self-contained.** `python -m app.ingest` and `python -m app.profile_dataset`
+run at image-build time, so the container carries the 50k index and starts
+instantly. Non-root, listens on `$PORT` (default 7860).
 
-`data/companies.json` — 50,000 rows, profiled reproducibly by
-`python -m app.profile_dataset` → `data/PROFILE.md`.
+```bash
+docker build -t compara-search .
+docker run -p 7860:7860 -e OPENAI_API_KEY=sk-... compara-search
+curl -s localhost:7860/health
+```
+
+**Render.com (free tier).** Dashboard → **New → Web Service** → connect the repo →
+runtime **Docker** (auto-detected) → instance type **Free**. Under *Environment*
+add `OPENAI_API_KEY` (and `AGENT_API_KEY` if you want the endpoint gated). The
+image bakes the index in, so no persistent disk is needed. `render.yaml` is kept
+as a config reference. The free instance spins down after ~15 min idle → the next
+request cold-starts in ~30–60 s.
+
+**Alternatives.** *Google Cloud Run* (`gcloud run deploy --source .`) — card
+required. *Vercel* was rejected: serverless execution-time limits fight a
+bounded-but-slow run, there's no persistent process for run state, and the bundle
+cap is tight — sync-only + external state for no gain over a container.
+
+---
+
+## The dataset shapes the design
+
+`data/companies.json` — 50,000 rows. `python -m app.profile_dataset` regenerates
+`data/PROFILE.md` and `data/dataset_vocab.json`.
 
 | Field | Reality |
 |---|---|
-| `industry` | **10 labels only** — no "Cybersecurity" |
-| `location` | **8 countries only**: Finland, Germany, France, Norway, Sweden, Netherlands, USA, UK |
+| `industry` | 10 labels only  |
+| `location` | 8 countries: Finland, Germany, France, Norway, Sweden, Netherlands, USA, UK |
 | `revenue_range` | 6 buckets, skewed large (~1,400 companies below €10M) |
-| `employee_count` | 5 – **5000** (5000 is the maximum) |
+| `employee_count` | 5 – 5000 (5000 is the max) |
 | `founded_year` | 1995 – 2024 |
-| `description` | one templated sentence: `"{adjective} {noun} for {topic}."` — 1,308 distinct strings over 50k rows. **8 adjective prefixes** (`AI-powered`, `data-driven`, …) and **6 noun heads** (`platform`, `engine`, `infrastructure`, `software`, `system`, `solution`) are pure filler; **27 core topic phrases** carry the meaning. |
+| `description` | one templated sentence: `"{adjective} {noun} for {topic}."` — 8 filler adjectives, 6 filler nouns, and **27 topic phrases** that carry all the meaning |
 
-Consequences that shaped the design:
+Three consequences:
 
-- **Semantic search is low-value here.** Descriptions collapse to a handful of
-  topic keywords, so FTS5 keyword matching over the structurally-filtered set
-  captures nearly all of the signal. No embeddings (the path is described below).
-- **The whole topic vocabulary is mapped.** All 27 core topics are in
-  [app/lexicon.yaml](app/lexicon.yaml); `profile_dataset` writes
-  `data/dataset_vocab.json` and a parametrised test
-  (`test_lexicon.py::test_lexicon_covers_every_core_dataset_topic`, plus a
-  `<topic> <noun-head>` variant) fails if the lexicon drifts out of sync with the
-  data. Adjective prefixes and noun heads are stripped or ignored in parsing.
-  The **interpret prompt is given the 27-topic list**, so free-text phrasing the
-  lexicon doesn't contain still lands on a real topic at parse time
-  ("cancer research" → `["drug discovery", "molecular analysis"]`); the lexicon is
-  the deterministic backstop when the model keeps the raw phrase.
-- **Domain terms are not industries.** "drug-discovery companies" → `industry =
-  Biotech` **plus** a topic filter. The interpret step emits both; the plan
-  validates the industry against the 10-label enum.
-- Relative terms ("Nordic", "after 2015", "below €10M") are resolved to concrete
-  values **deterministically** — `regions.yaml`, a revenue-bucket parser — never
-  by the model.
-- **Evidence is bounded by the source.** A one-sentence description often can't
-  support "serves European banks". Groundedness leans on a deterministic
-  span-check; expect responses where `evidence` is one span and the rest is
-  clearly-labelled `inference`.
+- **Keyword search is enough.** Every description reduces to one of 27 topics, so
+  FTS5 keyword matching over the structurally-filtered set captures the signal.
+  No embeddings — see "Semantic retrieval" under "Limitations & what's next" for
+  where they'd earn their place.
+- **All 27 topics are mapped.** [app/lexicon.yaml](app/lexicon.yaml) covers every
+  one, and a parametrised test fails if it drifts out of sync with the data. The
+  interpret prompt also carries the list, so free-text phrasing resolves at parse
+  time ("cancer research" → `["drug discovery", "molecular analysis"]`); the
+  lexicon is the deterministic backstop.
+- **Relative terms are resolved in code, never by the model** — "Nordic" →
+  FI/NO/SE via `regions.yaml`, "below €10M" → two revenue buckets via a parser.
+  An unknown term becomes a recorded ambiguity, not a guess.
 
 ---
 
-## Implemented workflow
+## How it works
 
 | Node | Kind | What it does |
 |---|---|---|
-| `interpret_mandate` | **LLM #1** | NL mandate → `MandateCriteria` (mandatory / preferences / exclusions, resolved relative terms, `industries` + `capabilities` mapped onto the dataset's 10 industries + 27 topics, ambiguities). Five few-shot examples; strict `response_format`. |
-| `build_search_plan` | deterministic | `MandateCriteria` → `SearchPlan`. Validates industries against the enum, resolves geography through `regions.yaml` ("United Kingdom" → "UK"), normalises capability phrases via the lexicon ("fraud-detection technology" → "fraud detection", hyphens and British spelling included), turns a region word inside a `serves` phrase ("European banks") into a location *preference*, builds the revision ladder. |
-| `check_feasibility` | deterministic | `count_matching(mandatory structured filters)`. **0 → short-circuit** to an empty result + reason, spending zero further LLM calls (this is how Q5 stays cheap and correct). |
-| `retrieve` | tools | `search_companies`: mandatory filters as a hard SQL `WHERE`, then FTS5 bm25 over ORed topic phrases, then the exclusion gate. A **second search filtered on the preferences too** is merged in (so preference-perfect rows aren't lost to the bm25 `LIMIT`), then the pool is re-ranked by preference fit. Combined pool ≤ 100. |
-| `validate_and_rank` | **LLM #2 (#3)** | One batched call judges the top `validation_batch` (10) candidates — each capability / "serves" phrase **supported + a verbatim quote**; it does *not* decide the ranking or a score. The whole retrieval pool is then scored + tiered-sorted deterministically (see below); `result_limit` rows are returned, those in the batch `llm_validated: true`, any beyond keyword-matched only. **Skipped entirely** when the mandate is purely structural (no capability, "serves" or semantic exclusion) — 0 LLM calls, and every row `llm_validated: false` (nothing to check). |
-| `relax_preferences` | deterministic | A fixed ladder (widen founding-year → drop it → drop the employee band → enlarge the pool). Mandatory criteria and exclusions are never touched. ≤ 1 revision. |
-| `compose_response` | deterministic | Hydrates every returned company's fields **from the DB via `get_by_ids`** (never from LLM output), assembles `AgentResponse` with `interpreted_mandate`, `search_plan`, ranked `results`, `revision`, and `metadata` (including the funnel). |
+| `interpret_mandate` | **LLM** | query → `MandateCriteria`: mandatory / preference / exclusion split, phrasing mapped onto the 10 industries + 27 topics, relative terms resolved, `serves` phrases and `ambiguities` extracted. 5 few-shot examples, strict `response_format`. |
+| `build_search_plan` | code | `MandateCriteria` → `SearchPlan`: validate industries against the enum, resolve geography, normalise capability phrasing through the lexicon, build the revision ladder. |
+| `check_feasibility` | code | `count_matching(mandatory filters)`. **0 → stop here** with an empty result + reason. No further LLM calls. |
+| `retrieve` | tools | `search_companies`: mandatory filters as a hard SQL `WHERE`, then FTS5 bm25 on the topic phrases, then the exclusion gate. A second, preference-filtered search is merged to the front so preference-perfect rows survive the pool cap (≤ 100). |
+| `validate_and_rank` | **LLM** | one batched call over the top ≤ 10 candidates — per capability / `serves` phrase: "supported? + a verbatim quote". It does **not** score or rank. Then deterministic scoring + sort over the whole pool. **Skipped** (0 LLM calls) when the mandate is purely structural. |
+| `relax_preferences` | code | a fixed ladder — widen the founding-year preference, then drop it, then drop the employee band, then enlarge the pool. Mandatory criteria untouched. ≤ 1 revision. |
+| `compose_response` | code | hydrate every returned company from the DB (never from LLM output); assemble `AgentResponse`. |
 
-**LLM-call budget**: infeasible = 1, purely structural = 1, typical = 2, revision
-run = 3. Hard cap 5.
+**LLM calls per run:** 1 (infeasible or purely structural), 2 (typical), 3 (with a
+revision). Hard cap 5, enforced by `BudgetGuard`.
 
-### Why a workflow, not agents
+### Structured state
 
-It is still an agent loop in the meaningful sense (plan → act → observe → adapt);
-the loop just has a **deterministic controller** instead of an LLM one. By
-Anthropic's "Building Effective Agents" taxonomy this is a *workflow*, and that
-guidance says workflows win for well-defined tasks — this one is: the retrieval
-strategy is fully derivable from the parsed mandate. An LLM-driven planner would
-be warranted with a large, open-ended tool space where the right strategy can't be
-determined up front; here there are three tools and one bounded revision, so an
-LLM controller would add failure modes (uncontrolled loops, unpredictable cost)
-without adding capability.
+One Pydantic model, `RunState` ([app/state.py](app/state.py)), passes between
+nodes. Each LLM call has its own narrow schema — no open `dict` fields, safe for
+strict mode, never a reused storage model:
 
-### Why LangGraph (and a framework-free fallback)
+- `MandateCriteria` — the parse. `capabilities_any` vs `capabilities_all` carries
+  the OR/AND distinction.
+- `ValidationBatch` → `CandidateJudgement` — the text judgement. Carries **no
+  company fields**; ids and records are joined back in code.
 
-LangGraph maps cleanly onto a bounded state machine — explicit nodes, a couple of
-conditional edges, no hidden control flow — which is exactly the shape here. The
-system was built and shipped first on a **~40-line custom driver**
-([app/workflow.py](app/workflow.py)); the LangGraph engine ([app/graph.py](app/graph.py))
-is a port on top, using the *same* node functions and the *same* `BudgetGuard`,
-with `RunState` carried under one state key so there are no partial-dict reducers
-to reason about. `cfg.engine` selects (`driver` is the default); a test asserts
-both engines produce identical results. LangGraph's `recursion_limit` is only a
-secondary backstop — the guard is the real bound.
+Everything else (`SearchPlan`, `RankedCompany`, `AgentResponse`, `RunTrace`) is
+internal and never sent to the model.
+
+### The three tools
+
+[app/tools.py](app/tools.py) — pure functions, explicit Pydantic in/out,
+deterministic, zero LLM tokens:
+
+| Tool | In → Out | What |
+|---|---|---|
+| `search_companies` | `StructuredFilters`, `topic_terms`, `Exclusions`, `limit` → `SearchResult` | mandatory filters → SQL `WHERE`; FTS5 bm25 on ORed topic phrases within that set; exclusion gate (`industry NOT IN` + keyword substring); truncate to `limit` (≤ 100). Returns candidates + counters (`matched_filters`, `matched_query`, `excluded`, …). |
+| `count_matching` | `StructuredFilters` → `int` | feasibility gate + revision reasoning. Mandatory filters only. |
+| `get_by_ids` | `list[int]` → `list[Company]` | order-preserving hydrate + region lookup. Powers span-grounding and the final response. |
+
+`search_companies` only accepts `StructuredFilters` (mandatory) — a *preference*
+cannot become a hard filter, enforced by the type.
+
+### A query, end to end
+
+*"Find fintech companies in Finland working on fraud detection or banking
+analytics. Prefer companies founded after 2015 with fewer than 250 employees."*
+
+**1. `interpret_mandate` (LLM):**
+```
+mandatory:   countries=[Finland]  industries=[Fintech]
+             capabilities_any=[fraud detection, banking analytics]
+preferences: founded_year_gte=2016  employee_count_lte=249
+```
+
+**2. `build_search_plan` (code):** `Fintech` is in the enum; `Finland` is a
+country; topic terms are the two capabilities; the preferences stay out of the
+filter.
+
+**3. `check_feasibility`:**
+```sql
+SELECT COUNT(*) FROM companies c
+WHERE c.industry IN ('Fintech') AND c.location IN ('Finland');   -- 580 > 0, feasible
+```
+
+**4. `retrieve` → `search_companies`** (topic terms present, so the FTS join):
+```sql
+SELECT c.*, bm25(companies_fts) AS bm25_score
+FROM companies_fts JOIN companies c ON c.id = companies_fts.rowid
+WHERE companies_fts MATCH '"fraud detection" OR "banking analytics"'
+  AND (c.industry IN ('Fintech') AND c.location IN ('Finland'))
+ORDER BY bm25_score
+LIMIT 100;
+```
+A second query adds `AND c.founded_year >= 2016 AND c.employee_count <= 249`; its
+hits go to the front of the pool. (No topic terms → no FTS join, `ORDER BY c.id`.
+A revenue / `serves` / exclusion clause adds more `AND …` predicates.)
+
+**5. `validate_and_rank` (LLM):** the model sees the top 10 records and reports,
+per company, whether the text supports "fraud detection" and "banking analytics",
+with a quote. Code then applies the OR gate (keep if ≥ 1), computes
+`score = 0.65·(mandatory fraction) + 0.35·(preference fraction)`, and sorts by
+tier.
+
+**6. `compose_response`:** company fields pulled from the DB by id, response
+assembled.
 
 ---
 
-## Structured state
+## Orchestration: a workflow, not an agent
 
-One Pydantic model, `RunState` ([app/state.py](app/state.py)), is passed between
-nodes. Every LLM output has its own **narrow, purpose-built** schema — no open
-`dict` fields, safe for OpenAI strict mode, and never a reused storage model:
+It is still an agent loop in the useful sense — plan (interpret), act (retrieve),
+observe (validate), adapt (revise) — but the loop's controller is Python, not a
+model. By Anthropic's "Building Effective Agents" taxonomy that makes it a
+*workflow*, and the guidance there is that workflows win for well-defined tasks.
+This one is well-defined: with 8 countries, 10 industries, 27 topics and 3 tools,
+the retrieval strategy is fully derivable from the parsed mandate. An LLM-driven
+planner would be warranted with a large, open-ended tool space where the right
+next step genuinely can't be decided up front; here it would only add failure
+modes — uncontrolled loops, unpredictable cost — for no extra capability. So the
+control flow is hand-written and bounded by `BudgetGuard`; it cannot loop
+uncontrollably.
 
-- `MandateCriteria` — interpret output. Mandatory / preferences share
-  `MandateConstraints`; `capabilities_any` vs `capabilities_all` carries the
-  any/all distinction.
-- `ValidationBatch` → `CandidateJudgement` — validate output. Carries **no
-  company fields**; IDs and record data are joined back in code afterwards.
-- `SearchPlan`, `FeasibilityResult`, `RankedCompany`, `AgentResponse`,
-  `RunTrace` (with the narrowing `Funnel`) — internal, never sent to the model.
+**Two interchangeable engines**, selected by `cfg.engine`:
+
+- **`driver`** (default) — a ~25-line loop in [app/workflow.py](app/workflow.py)
+- **`graph`** — a LangGraph `StateGraph` in [app/graph.py](app/graph.py): the same
+  seven node functions, the same `BudgetGuard`, `RunState` under one state key
+
+`test_both_engines_agree` asserts identical output.
+
+**LangGraph is overkill here.** This flow is almost linear — no
+persistence, no human-approval gates, no parallel fan-out — nothing a framework
+buys over a `for` loop. The driver is the real engine. I built the port because I
+wanted hands-on time with LangGraph, and because it's a concrete check that the
+node functions aren't coupled to the control flow: if this ever needed a
+checkpointer or interrupt nodes (see "what's next"), the swap is already done and
+tested. For now it's a curiosity and a seam, not a necessity.
 
 ---
 
-## Tool contracts
+## What the LLM decides — and what it doesn't
 
-Three tools ([app/tools.py](app/tools.py)), each a pure function with an explicit
-Pydantic input/output schema, **deterministic, zero LLM tokens**:
+**The model does exactly two things:**
 
-| Tool | Input | Output | Notes |
-|---|---|---|---|
-| `search_companies` | `StructuredFilters`, `topic_terms`, `Exclusions`, `limit` | `SearchResult` (candidates + `matched_filters` / `matched_query` / `excluded` / `fts_query` / `truncated`) | 1. mandatory filters → SQL `WHERE` (hard gate). 2. FTS5 bm25 on ORed topic phrases within that set. 3. exclusion gate (industry `NOT IN` + keyword substring). 4. truncate to `limit` (≤ 100). |
-| `count_matching` | `StructuredFilters` | `int` | Feasibility gate + revision reasoning. Mandatory filters only — exclusions are **not** applied (feasibility is about whether the mandate itself can be met). |
-| `get_by_ids` | `list[int]` | `list[Company]` | Order-preserving hydrate + region lookup. Evidence lookup and final response assembly. |
+1. **Parses the request** (`interpret_mandate`) — natural language → the
+   structured `MandateCriteria`.
+2. **Judges text** (`validate_and_rank`) — for each candidate, per requirement:
+   is it supported by the description, and what is the verbatim quote? Nothing
+   more — the prompt says so explicitly ("you do not decide the ranking or a
+   score").
 
-There is **no parameter** through which a *preference* could become a hard
-filter — `search_companies` only accepts `StructuredFilters` (mandatory). Enforced
-by the type.
+**Everything else is deterministic Python:**
+
+| | where |
+|---|---|
+| which companies are retrieved | SQL `WHERE` + FTS5 |
+| "Nordic" → countries, "€10M" → buckets, industry-enum validation | `config.py` + the YAML tables |
+| the capability AND/OR logic and the drop decision | `validate_and_rank` |
+| `mandatory_met` / `mandatory_total`, the `score`, the tiered sort | `_finalise_ranking` |
+| preference fit — company fields vs the preferences | `_preference_fit` |
+| the revision trigger + the relaxation ladder | `relax_preferences` |
+| span-grounding — a quote not literally in the record is demoted regardless of what the model said; the model's `source_field` label is not trusted | `_resolve_source_field` |
+| every company field in the response | `get_by_ids`, never the model |
+
+**So the model's output changes the result in only two ways:** it can **drop a
+candidate** (says "doesn't do capability X" and an FTS keyword match doesn't
+rescue it), and it can **raise `mandatory_met`** with a grounded `serves` quote
+(rare — see below). It also fills `evidence[]` vs `inferences[]`, which is central
+to groundedness but doesn't move the ranking.
+
+There is **no LLM-assigned relevance score** — the ranking is the deterministic
+tier sort described below.
 
 ---
 
-## Retrieval & filtering strategy
+## Retrieval, scoring & groundedness
 
-`companies.json` → **SQLite** (`app.ingest`, committed source, index rebuilt at
-image-build time): typed columns, derived `revenue_min/max_eur`, a
-`company_regions` lookup so region filters are a plain JOIN, and an **FTS5**
-(bm25, porter-stemmed) virtual table over `name + description`.
+`companies.json` → SQLite (`app.ingest`): typed columns, derived
+`revenue_min/max_eur`, a `companies_fts` FTS5 table (bm25, porter-stemmed) over
+name + description, a `company_regions` lookup.
 
-- **Structured filters** are SQL `WHERE` predicates — the primary recall gate.
-- **Keyword / topic** is FTS5 bm25 over the filtered id-set. On the templated
-  descriptions bm25 barely varies, so it's used only for the pool `LIMIT` and as
-  a final tie-break — not shown, not in the score.
-- **Preferences are never filters.** But bm25 (near-random here) can truncate a
-  preference-perfect company out of the pool `LIMIT`, so `retrieve` runs a
-  **second search that also filters on the preferences** and merges its hits into
-  the front of the pool (combined pool still ≤ 100). Preferences then drive the
-  pool re-rank and the tiered sort.
-
-**Why no embeddings.** Profiling showed keyword ≈ semantic on this data, and
-FTS5 is one fewer dependency to build and defend. For real data the README's
-"how it scales" section describes the local-ONNX re-rank and, at scale,
-Elasticsearch + a vector DB.
-
-### The narrowing funnel
-
-Every run reports where the candidates go (`--verbose`, the `run.funnel` log
-line, `metadata.funnel`):
+**The funnel** — reported on every run (`--verbose`, `metadata.funnel`):
 
 ```
-mandatory_filters → topic_match → after_exclusions → retrieved_pool (≤100)
+mandatory_filters → topic_match → after_exclusions → pool (≤100)
   → sent_to_validation (≤10) → passed_validation → returned (≤ result_limit, default 10)
 ```
 
-So "580 companies matched, why did I get 10?" is one block: a topic filter, a
-bm25 sort, and two hard caps.
+That is the answer to "580 matched, why did I get 10": a topic filter, a bm25
+sort, and two hard caps.
 
----
+**Filters vs preferences.** Mandatory criteria are the hard SQL gate. Preferences
+never filter — they drive the pool re-rank and the final sort. The extra
+preference-filtered retrieval exists only so a preference-perfect company isn't
+lost to the bm25 `LIMIT`.
 
-## Validation, ranking & groundedness
+**bm25's role.** bm25 is how FTS5 ranks a keyword match — the topic search runs
+on it. But the descriptions are templated ("*predictive engine* for fraud
+detection" vs "*automated software* for fraud detection"), so two companies
+matching the same topic score almost identically and bm25 can't separate them.
+So it does two narrow jobs: decide which ≤ 100 rows enter the pool when more
+match (`ORDER BY bm25_score LIMIT 100`), and break an exact tie in the final
+sort. The ranking you actually see is the deterministic tier sort below, not
+bm25. On real, varied prose bm25 would carry real weight.
 
-`validate_and_rank` hands the model the full record plus **what is already known**
-— which mandatory criteria are structurally satisfied, which need a text
-judgement, which preferences the record matches — so it spends its effort on the
-text asks, not on re-deriving facts we hold. A test asserts these signals are in
-the rendered prompt.
-
-The model returns per-capability / per-"serves" `TextFinding`s (`supported` +
-`quote`). Then **deterministic** post-processing:
-
-- **Span-grounding check**: every `quote` is resolved to the *real* text field
-  (`description` / `name`) it literally occurs in (via `get_by_ids`). A quote that
-  occurs nowhere is demoted from `evidence` to `inference`, and the model's own
-  `source_field` label is not trusted. *A cited quote is an LLM claim until
-  verified.*
-- **Capability gate**: `capabilities_any` → satisfied if ≥ 1 supported;
-  `capabilities_all` → all supported. This set logic lives in code, never in the
-  prompt. (An FTS match rescues a capability the model *omitted*, never one it
-  explicitly rejected.) A candidate that does *none* of the required capabilities
-  is dropped.
-- **`serves` counts toward the mandate, but is rarely met.** A *"serves / sells
-  to X"* phrase is a real mandatory requirement, so it's in `mandatory_total` —
-  but this dataset has no customer field and the one-sentence descriptions never
-  name customers, so it is almost always unverifiable. The result: a query like
-  Q3 lands every row at `mand 3/4`, `full_match` is `false`, the gap is written
-  into `inferences[]` ("serves: European banks — not stated…"), and
-  `metadata.caveats` explains why. A customer mention the model *does* find only
-  counts if its quote grounds in the text.
-
-### Scoring — two fractions, a tiered sort, one readout
-
-Each result reports:
+**Scoring.** Each result reports:
 
 | field | meaning |
 |---|---|
-| `mandatory_met / mandatory_total` | **every** mandatory requirement — location, industry, each numeric bound, each exclusion, the capability group, and each `serves` phrase. Structural ones hold by construction; `serves` usually does not (see above). The total shows the mandate's size. |
-| `preferences_met / preferences_total` | soft preferences met; each miss named in `unmet_preferences` |
-| `score` | `0.65·(mand fraction) + 0.35·(pref fraction)` — a **readout**, not the sort key |
-| `keyword_score` | min-max normalised bm25 (JSON only; near-noise here, so not displayed) |
-| `llm_validated` | text-checked by the model, or a deterministic-only tail row (rank > `validation_batch`)? |
+| `mandatory_met / total` | every mandatory requirement — location, industry, each numeric bound, each exclusion, the capability group, each `serves` phrase. Structural ones always hold; the total is the mandate's size. |
+| `preferences_met / total` | soft preferences met; each miss named in `unmet_preferences` |
+| `score` | `0.65·mand + 0.35·pref` — a readout, **not** the sort key |
 
-The **sort is tiered** — `(all mandatory met? → # mandatory met → # preferences
-met)`, then bm25 silently breaks an exact tie. No weights decide order.
+The **sort is tiered**: `(all mandatory met?, #mandatory met, #preferences met)`,
+then bm25 breaks an exact tie. No weights. When every returned row sits in one
+tier that is larger than the returned slice, `results_are_top_ranked` is `false`
+and `ranking_note` says so ("25 companies meet every requirement and preference;
+the 10 returned are an arbitrary slice").
 
-`metadata.match_summary` covers the *whole* matched set, not the returned slice:
-how many pass the filters, how many of those meet **every** preference (a SQL
-count), how many the LLM confirmed. `results_are_top_ranked` is `false` when every
-returned row sits in one tier and that tier is larger than the slice — then
-`ranking_note` says e.g. *"25 companies meet every requirement and preference; the
-10 returned are an arbitrary slice"*.
+**Groundedness.** The model returns `{supported, quote}` per requirement; then:
 
-`evidence[]` (verified quotes) and `inferences[]` (model claims + basis) are
-always split.
+- every quote is checked as a literal substring of the real record. Not found →
+  demoted from `evidence[]` to `inferences[]`. *A cited quote is a claim until
+  verified.*
+- `evidence[]` (verified) and `inferences[]` (model claim + basis) are always
+  separate in the response.
+
+**`serves` phrases** — "provides X *to European banks*". These describe the
+customer, not the company:
+
+- they are a mandatory requirement (counted in `mandatory_total`)
+- this dataset has **no customer field**, so they are almost never verifiable →
+  the row lands at e.g. `3/4`, `full_match` is `false`, the gap goes to
+  `inferences[]`, and `metadata.caveats` explains why
+- a region word *inside* the phrase ("**European** banks") becomes a location
+  *preference*, never a filter — the mandate never said where the company itself
+  is based
+
+---
+
+## Bounded execution & recovery
+
+- **`check_feasibility`** — 0 mandatory matches → an empty result naming the
+  failed criteria, zero further LLM calls. This is the real "no results" path
+  (Q5 hits it).
+- **`relax_preferences`** — if too few candidates clear the capability gate after
+  the first pass, relax the softest preference and retrieve once more.
+  Implemented and unit-tested, but it **never fires on the evaluation queries**:
+  this dataset is dense enough that any feasible mandate returns a full set. On
+  sparse real data it would matter.
+- **`BudgetGuard`** ([app/budget.py](app/budget.py)) — checked at the entry of
+  every node on both engines: LLM calls ≤ 5, iterations ≤ 2, revisions ≤ 1, pool
+  ≤ 100, validation batch ≤ 10, results ≤ 50 (default 10), wall-clock deadline. A
+  breach returns a composed partial response with `stop_reason` set — never an
+  exception, never an unbounded loop.
 
 ---
 
@@ -265,8 +371,8 @@ always split.
 `POST /agent/search` runs the full workflow synchronously and returns the same
 `AgentResponse` the CLI produces. `GET /health` reports index status; `GET /docs`
 is the generated OpenAPI UI (the authoritative schema). An `X-API-Key` header is
-checked against `AGENT_API_KEY` when that env var is set — wallet protection for a
-public URL, not a security boundary.
+checked against `AGENT_API_KEY` **only when that env var is set** — wallet
+protection for a public URL, not a security boundary.
 
 ```jsonc
 // request
@@ -279,8 +385,7 @@ public URL, not a security boundary.
   "interpreted_mandate": { "mandatory": {…}, "preferences": {…}, "exclusions": {…},
                            "semantic_focus": "…", "ambiguities": ["…"] },
   "search_plan": { "filters": {…}, "topic_terms": ["…"], "topic_mode": "any",
-                   "exclusions": {…}, "preferences": {…}, "serves": ["…"],
-                   "revision_policy": {…}, "notes": ["…"] },
+                   "preferences": {…}, "serves": ["…"], "notes": ["…"] },
   "results": [
     { "rank": 1, "company_id": 123, "name": "…", "industry": "…", "location": "…",
       "founded_year": 2019, "employee_count": 40, "revenue_range": "1M-10M",
@@ -296,428 +401,178 @@ public URL, not a security boundary.
   "empty_reason": "",
   "metadata": {
     "stages_executed": ["…"], "tools_called": [ { "name": "…", "ok": true } ],
-    "candidates_retrieved_per_iteration": [100], "candidates_validated": 10,
     "funnel": {…}, "match_summary": {…}, "validation_outcome": {…},
     "revised_search_performed": false, "ranking_note": "", "caveats": ["…"],
-    "llm_calls": 2, "prompt_tokens": 4700, "completion_tokens": 1400,
-    "est_cost_usd": 0.0015, "latency_ms": 9000, "model": "gpt-4o-mini",
+    "llm_calls": 2, "prompt_tokens": 5000, "completion_tokens": 1200,
+    "est_cost_usd": 0.0016, "latency_ms": 9000, "model": "gpt-4o-mini",
     "provider": "openai", "timed_out": false, "stop_reason": ""
   }
 }
 ```
 
-Two nested timeouts: `BudgetGuard`'s per-run deadline (`AGENT_DEADLINE_S`, ~90 s)
-returns a partial body with `timed_out: true`; the client should also set its own
-request timeout above that. Execution is synchronous — an async `202` + status
-endpoint is described under "What was intentionally left out".
+`BudgetGuard`'s per-run deadline (`AGENT_DEADLINE_S`, ~90 s) returns a partial
+body with `timed_out: true` rather than hanging; there is no server-side HTTP
+timeout, so clients should set their own above 90 s. An async `202` + status
+endpoint is a documented cut.
 
 ---
 
-## Search-revision & failure recovery
+## LLM client & cost
 
-- `check_feasibility` → 0 mandatory matches → empty result + which criteria
-  failed, **no wasted LLM calls**. This is the primary "insufficient results"
-  path, and Q5 exercises it.
-- Otherwise, if fewer than `min_results` candidates clear the capability gate
-  after iteration 1 and no revision yet → `relax_preferences` (a deterministic
-  ladder, preferences only) → one more retrieve + validate. Bounded: ≤ 1
-  revision, ≤ 2 iterations.
-- `BudgetGuard` ([app/budget.py](app/budget.py)) is checked at every node entry on
-  both engines: LLM calls ≤ 5, iterations ≤ 2, revisions ≤ 1, pool ≤ 100,
-  validation batch ≤ 10, results ≤ 50 (default 10 — see D14a), wall-clock
-  deadline. A breach raises `BudgetExceeded`; the runner records `stop_reason` and
-  still returns a composed partial response — never an exception, never an
-  unbounded loop.
+- **`openai:gpt-4o-mini`, one provider.** ~$1–3 to build and evaluate the whole
+  thing. Pricing checked live (Aug 2026): $0.15 / $0.60 per 1M tokens.
+- **`LLMClient.complete(messages, response_model)`** — the only entry point the
+  nodes use. `chat.completions.parse` with a Pydantic model as strict
+  `response_format`; a ~200-line hand-written wrapper, not a LangChain class. One
+  repair retry on a schema-validation failure, then a structured `LLMError`; a
+  429 gets one `Retry-After` backoff.
+- **Fake provider** backs the whole test suite (schema-valid dummies, offline,
+  zero tokens). Only `tests/test_live_smoke.py` (opt-in, `RUN_LIVE=1`) and
+  `app.cli eval --provider openai` spend money.
+- **Response cache** namespaced by provider identity, so a fake answer is never
+  served for a real call.
+- The `Provider` protocol is the seam for multi-provider / self-hosted models.
 
-The `relax_preferences` path (`≤ 1`, deterministic ladder) is implemented and
-unit-tested (`test_workflow.test_revision_path_runs_once`, which scripts an empty
-first validation pass). It is **not exercised by the evaluation queries**: this
-dataset is dense enough that every *feasible* mandate returns a full result set,
-so the honest "too few results" trigger is `check_feasibility` returning empty
-(Q5), not a mid-run revision. On sparse real data, a restrictive preference could
-leave the validated set below `min_results`, and the ladder would relax the
-softest preference and re-search once.
-
----
-
-## LLM & model choices
-
-- **`openai:gpt-4o-mini`, single provider.** ~$1–3 to build and evaluate the
-  whole system; cheap enough that rate-limit management and "$0-equivalent" cost
-  reporting aren't worth it. Pricing verified against live docs (Aug 2026):
-  $0.15 / $0.60 per 1M tokens.
-- **`LLMClient.complete(messages, response_model)`** is the only entry point the
-  nodes use — a ~200-line wrapper, every line explainable, not a LangChain model
-  class. `chat.completions.parse` with a Pydantic model as strict
-  `response_format`.
-- **Fake provider** backs the entire test suite — schema-valid dummies, zero
-  tokens, offline. Only `tests/test_live_smoke.py` (opt-in, `RUN_LIVE=1`) and
-  `app.cli eval --provider openai` hit the paid API.
-- **Response cache** namespaced by provider identity (`fake` vs
-  `openai:gpt-4o-mini`) so a fake answer is never served for a real call.
-- **One repair retry** on schema-validation failure, then a structured
-  `LLMError`. A 429 gets one `Retry-After` backoff, then fails gracefully.
-- The `Provider` protocol is the seam toward multi-provider fallback /
-  self-hosted models (see "how it scales").
-
----
-
-## Latency & cost observations
-
-From `app.cli eval --provider openai --no-cache` (7 queries, real API):
-
-| | typical run | infeasible (Q5) |
+| | typical | infeasible (Q5) |
 |---|---|---|
 | LLM calls | 2 | 1 |
-| tokens | ~4,700 in / ~1,400 out | ~1,750 in / ~200 out |
-| est. cost | **~$0.0015** | **~$0.0004** |
-| latency | 6–14 s | ~2 s |
+| tokens | ~5,000 in / ~1,200 out | ~1,800 in / ~200 out |
+| cost | ~$0.0016 | ~$0.0005 |
+| latency (local) | 6–14 s | ~2 s |
 
-A full 7-query eval pass is **~$0.009**. The dominant cost is the validation
-call's prompt (10 candidate records). `--no-cache` gives real numbers; with the
-cache, dev re-runs are near-instant and free.
+A full 7-query eval is ~$0.01. On the free-tier deploy, latency is 2–3× higher
+and a cold start adds up to ~60 s.
 
 ---
 
 ## Evaluation
 
-Development iterates against `eval/dev_queries.yaml` (20 self-authored queries).
-The 5 core queries + supplements S1/S3 in `eval/queries.yaml` are the scored set,
-each with a **hand-authored `expected` block** — the "correct parse" oracle. The
-5 cover the main capability dimensions: qualitative + structured criteria (Q1),
-mandatory vs preferred (Q2), exclusions + evidence (Q3), controlled revision (Q4),
-and empty / conflicting handling (Q5).
+`eval/queries.yaml` — 5 core queries (qualitative + structured criteria;
+mandatory vs preferred; exclusions + evidence; controlled revision; empty /
+conflicting handling) + 2 supplements, each with a hand-written `expected` block.
+Development iterated on the separate `eval/dev_queries.yaml` (20 queries);
+`queries.yaml` was held back and looked at only a few times while debugging,
+always for general correctness rather than to overfit the expected strings.
 
-**Parse accuracy.** Running the 20 dev queries through `check` (interpret + plan),
-the parse was fully correct on **14/20** before any tuning; all five core queries
-were correct. The failures clustered on *underspecified colloquial
-phrasing* — the model fabricating a numeric threshold for a vague word
-("innovative", "smaller/newer", "tiny"), or dropping a `<topic>` when it also
-implied an industry. Three prompt rules address these (a `to/serves <customer>`
-phrase is never a location filter; vague quality words go to `ambiguities`, never
-a fabricated bound; `<topic> companies` emits the topic *and* the industry) plus
-hyphen normalisation in the lexicon. An LLM self-verification pass over the parse
-is the natural next transparency step — see "What I'd do next".
+**A result is successful when:** every returned company satisfies the mandatory
+structured criteria; each has ≥ 1 grounded evidence span for what the text can
+support (gaps labelled, not hidden); no company is fabricated; every budget bound
+held; and when the data has no real match the answer is an empty list + a reason,
+not a padded one. Ranking quality within the "match" tier is a human call.
 
-**Honest note on held-out purity:** the intent was to run `queries.yaml` once as a
-direction check and not again until the final pass. In practice it was exercised
-a few times while debugging the end-to-end wiring, so the strict "look once"
-methodology is partly spent — but every prompt/code change was driven by *general*
-correctness (the mandatory / preference split, capability OR-logic, geography
-canonicalisation, British spelling, the vague-word and customer-vs-location rules
-above), not by fitting the expected strings. `dev_queries.yaml` carried the real
-iteration load.
+`app.cli eval` scores the deterministic checks → [eval/RESULTS.md](eval/RESULTS.md);
+the full ranked walkthrough is [eval/eval6.txt](eval/eval6.txt).
 
-**What counts as a successful result.** For a given query: every returned company
-satisfies all *mandatory structured* criteria; each has ≥ 1 grounded evidence span
-for the requirements the text can support (or the gap is labelled an inference,
-not hidden); no company is fabricated (every id exists in the dataset); the run
-stayed within every budget bound; when the data genuinely has no match the result
-is an empty list + a stated reason, not a padded or forced list; and — a human
-call — the ranking within the "match" tier is defensible.
+| Check | How | |
+|---|---|---|
+| parsed criteria | `interpreted_mandate` / `search_plan` vs `expected` | deterministic |
+| mandatory filters applied | re-check every returned company against the DB | deterministic |
+| companies exist | id membership against the dataset | deterministic |
+| evidence traceable | re-run span-grounding on every `evidence.quote` | deterministic |
+| revision flag / abstention / budget | vs `expected` and the caps | deterministic |
+| ranking quality, exclusion correctness, evidence *sufficiency* | manual note | judgment |
 
-`app.cli eval` scores the **deterministic** checks and writes
-[eval/RESULTS.md](eval/RESULTS.md):
-
-| Check | How |
-|---|---|
-| parsed criteria correct | `interpreted_mandate` / `search_plan` vs `expected` |
-| mandatory filters applied | re-check every returned company against parsed criteria, using the DB |
-| all returned companies exist | id set-membership against the dataset |
-| evidence traceable | re-run the span-grounding check on every `evidence.quote` |
-| revision performed == expected | `metadata.revised_search_performed` |
-| correct abstention (Q5) | `results == []` + reason present — **scored as PASS** |
-| budget respected | `llm_calls ≤ 5`, `iterations ≤ 2`, `revisions ≤ 1` |
-| ranking / exclusion / evidence *sufficiency* | manual judgment column |
-
-**Latest pass: 7/7 green** on the deterministic checks. The full ranked output
-for every query — interpreted mandate, ambiguities, results with evidence, the
-match summary, and a one-line judgment note — is in [eval/eval6.txt](eval/eval6.txt).
-
-Needs human judgment (not auto-scored): ranking quality, faithfulness to nuance,
-category-exclusion correctness, and whether the evidence is *sufficient* (not just
-present).
+**Latest: 7/7 green** on the deterministic checks. Parse accuracy on the 20 dev
+queries was 14/20 before prompt tuning (all 5 core queries correct); the misses
+were vague colloquial phrasing, addressed by prompt rules.
 
 ---
 
-## Deployment
+## Limitations & what's next
 
-**Live:** `https://find-companies.onrender.com` (Render free tier — first request
-after ~15 min idle cold-starts in ~30–60 s). `/docs` for the OpenAPI UI.
+**Known limitations**
 
-```bash
-curl -s https://find-companies.onrender.com/health
-curl -s -X POST https://find-companies.onrender.com/agent/search \
-  -H 'X-API-Key: <key provided separately>' -H 'content-type: application/json' \
-  -d '{"query":"German drug-discovery companies preferably founded after 2018"}'
-```
+- Ranking within a tier is only as good as the query's signal — no preference +
+  templated text means everyone ties, and `ranking_note` says so. Real varied
+  text would separate them.
+- Recall is bm25-top-100; a topic match past rank 100 never reaches validation.
+  Fine on this data, needs a bigger pool + embeddings on real data.
+- `serves`-style requirements are unverifiable here (no customer field), so
+  Q3-style rows top out at `partial`. The ceiling is the source, not the system.
+- Revision is implemented and tested but never triggers on this dense dataset.
+- Single provider, sync API, no run store — all deliberate; the seams are below.
 
-**Docker, self-contained.** `python -m app.ingest` runs at image-build time, so
-the container carries the 50k index and starts instantly. Runs as a non-root user
-on port 7860.
+**Cut for time:** embeddings / semantic re-rank; `GET /agent/runs/{id}` + a
+persistent `RunStore`; async `202` + status endpoint; a UI.
 
-```bash
-docker build -t compara-search .
-docker run -p 7860:7860 -e OPENAI_API_KEY=sk-... -e AGENT_API_KEY=secret compara-search
-curl -s localhost:7860/health
-```
+**What I'd build next**
 
-**Render.com (free tier, no card).** Create the service by hand — the Blueprint
-flow ([render.yaml](render.yaml) is kept as a config reference) asks for a card
-because a blueprint *could* provision paid resources; the manual path does not.
-
-1. Render dashboard → **New → Web Service** → connect this GitHub repo.
-2. Runtime **Docker** (auto-detected from the Dockerfile — no build/start command
-   to set), instance type **Free**.
-3. Under *Environment*, add `OPENAI_API_KEY` and `AGENT_API_KEY`.
-4. Create. Render builds the image (the 50k index is baked in at build time — no
-   persistent disk needed) and serves at `https://<name>.onrender.com`;
-   `/health` is the health check.
-
-The free instance has no persistent storage (fine — the only runtime write is the
-optional LLM response cache) and spins down after ~15 min idle → the next request
-cold-starts in ~30–60 s. Idle RAM is ~40 MB against the 512 MB limit.
-
-**Alternatives.** *Google Cloud Run* (`gcloud run deploy --source .`,
-scale-to-zero, generous free tier) — card required. *Hugging Face Spaces* — a
-push to a Docker Space works, but HF now gates the Docker SDK behind PRO.
-*Vercel* — analysed and rejected (below).
-
-**Vercel — analysed and rejected:** serverless execution-time limits fight a
-bounded-but-slow agent run; no persistent process for run state; ~250 MB bundle
-cap. It forces sync-only + a tight timeout + external state for no benefit over a
-persistent container.
-
----
-
-## Repository layout
-
-| Path | What |
-|---|---|
-| `app/ingest.py` | Build `companies.db`: typed columns, region lookup, FTS5, manifest. |
-| `app/tools.py` · `app/schemas.py` | The three retrieval tools + their Pydantic contracts. |
-| `app/llm.py` | `LLMClient` + `OpenAIProvider` / `FakeProvider`, response cache, cost table. |
-| `app/state.py` · `app/prompts.py` | Workflow schemas / `RunState` · the two prompt builders. |
-| `app/nodes.py` | The 7 nodes as `RunState → RunState` functions. |
-| `app/budget.py` · `app/workflow.py` · `app/graph.py` | `BudgetGuard` · custom driver · LangGraph engine. |
-| `app/api.py` · `app/cli.py` · `app/logging.py` | FastAPI · CLI · structured JSON logging. |
-| `app/evaluate.py` | End-to-end evaluation harness → `eval/RESULTS.md`. |
-| `app/config.py` · `app/*.yaml` | Taxonomy config: regions, lexicon, schema map, revenue buckets. |
-| `eval/queries.yaml` · `eval/dev_queries.yaml` | Scored set (with `expected`) · dev iteration set. |
-| `tests/` | 207 tests, offline, against the fake provider + a fixture index. |
-
-CLI: `ingest` · `db "<sql>"` · `search` (tools, no LLM) · `check` (interpret +
-plan + feasibility) · `run` · `eval`.
+- **An independent parse check.** The interpret step is the highest-leverage
+  failure point. Add a *second* LLM call — ideally a *different* model — that gets
+  the original query and the assembled plan and answers "does this capture every
+  hard requirement, and did it add a constraint the query doesn't state?",
+  writing findings into `ambiguities` (never mutating the plan). A different model
+  matters: the same one asked to check its own parse tends to defend it. A
+  clause-by-clause parse trace in the response is the cheap partial version.
+- **Semantic retrieval.** Right now retrieval is a structured SQL gate + FTS5
+  keyword match — enough for 27 templated topics, weak the moment descriptions are
+  real prose or a query uses wording the lexicon doesn't cover. The step up: embed
+  each company's text and the query's `semantic_focus`, and blend a cosine
+  re-rank into the pool ordering *after* the structured gate. `search_companies`
+  already takes a `semantic_query` argument that is currently ignored — that's the
+  hook. Start with a local model (`fastembed`, no torch) over the filtered subset;
+  no ANN index needed at this size.
+- **A much larger corpus** — once a linear scan over embeddings is too slow
+  (millions+ of rows), the vector index moves to a dedicated ANN store
+  (Qdrant / Weaviate / `pgvector`) and the structured filters to Elasticsearch,
+  hybrid-ranked; tiered filtering (structured gate → ANN → LLM validation);
+  embeddings precomputed in a batch pipeline; sharded by region / sector.
+- **Concurrent runs** — the workflow is already a pure `run_workflow(query, cfg)`
+  with no shared state: stateless workers behind a queue, a Postgres run store
+  behind the `RunStore` seam, Redis for locks, provider rate-limit pooling.
+- **Self-hosted LLMs** — the `Provider` protocol is the only seam; add a
+  `VLLMProvider`. The open question is structured-output reliability without
+  strict mode — grammar-constrained decoding (Outlines / GBNF) or a stricter
+  repair loop.
+- **Persistent workflow state** — LangGraph with a Postgres checkpointer: every
+  node boundary a resumable savepoint, human-approval interrupts drop in as
+  nodes. `RunState` is one Pydantic model, so it serialises as-is.
+- **Production monitoring** — the JSON logs (already keyed by `run_id`) and the
+  `RunTrace` counters → OpenTelemetry; dashboard funnel drop-off, p50/p95
+  latency, cost per run, abstention rate, `stop_reason`; alert on drift.
+- **Model & prompt versioning** — a prompt registry with content-hash version IDs
+  stamped into `RunTrace`; any prompt or model change runs `eval/queries.yaml` as
+  a CI gate against the previous version.
+- **Production eval** — labelled golden sets, retrieval recall@k, an LLM-judge
+  calibrated to human labels for the judgment columns, online feedback capture.
+- **Data lineage & governance** — an immutable run store; every evidence item
+  points to `(company_id, source_field, record_version)`; prompts + model
+  versions retained per run; access policy at the tool boundary.
+- **MCP** — the three tool contracts are already Pydantic in/out with no hidden
+  state; wrap them as an MCP server so the same tools serve other agents
+  unchanged.
 
 ---
 
-## Known limitations
 
-- **Ranking is only as good as the signal in the query.** With no soft preference
-  and templated descriptions (identical bm25), every match ties on the whole sort
-  key — `match_summary.results_are_top_ranked` goes `false` and `ranking_note`
-  says "N companies match equally; add a preference". On real, varied text bm25
-  would separate them.
-- **Recall is bm25-top-100.** Topic-matching companies past bm25 rank 100 never
-  reach validation. On this templated data the top 100 almost certainly contains
-  every real match; on real data this needs a bigger pool + embeddings.
-- **"serves X" is usually unverifiable** from a one-sentence description, so Q3-
-  style queries land every row at `mand 3/4` (never a full match), with the gap
-  labelled an inference and a caveat — correct, but the ceiling is the source, not
-  the system.
-- **Revision never fires on the eval queries** — the dataset is dense enough that
-  every feasible mandate returns a full set, so the honest "insufficient results"
-  path is `check_feasibility` → empty (Q5). The `relax_preferences` ladder is
-  implemented and unit-tested; on sparse real data it would relax the softest
-  preference and re-search once.
-- **The parse can still misread very vague phrasing** — see "Parse accuracy"
-  above (14/20 dev queries clean pre-tuning, all 5 required correct).
-- Single provider, sync API, in-memory (no) run store — all deliberate for the
-  time box; the seams to change each are called out below.
-
-## What was intentionally left out for time
-
-- **Embeddings / semantic re-rank** — profiling said it wouldn't move the needle
-  here; the path is documented.
-- **`GET /agent/runs/{id}` + a `RunStore`** — the API is stateless. A `RunStore`
-  protocol (in-memory dict now) is the ~20-line seam to add it.
-- **Async API (`202` + status endpoint)** — sync with a 90 s deadline is safe
-  behind a persistent container.
-- **A UI** — the CLI is the primary surface; the JSON API is the integration
-  surface.
-
-## What I'd do next (how it scales)
-
-- **LLM self-verification of the parse.** The interpret step is the highest-
-  leverage failure point. A cheap next step: after `build_search_plan`, one call
-  that gets the original query + the assembled plan and answers *"does this
-  capture every hard requirement, and did it invent any constraint not in the
-  query?"* — writing findings into `ambiguities`/`caveats` only (never mutating
-  the plan), or triggering a single bounded re-parse the way schema-repair does.
-  Deferred because the single interpret call was reliable on the target query
-  shape (14/20 dev, 5/5 required); a clause-by-clause parse trace in the response
-  is the lighter-weight version of the same idea.
-- **350M+ companies:** retrieval → **Elasticsearch** (structured filters + BM25)
-  **+ a vector DB** (Qdrant/Weaviate) with ANN, hybrid-ranked; tiered filtering
-  (cheap structured gate → ANN → LLM validation); sharding by region/sector;
-  embeddings precomputed in a batch pipeline.
-- **Concurrent agent runs:** the workflow is already a pure `run_workflow(query,
-  cfg)` with no shared mutable state, so it scales as stateless workers behind a
-  queue. Add a Postgres run store (behind a `RunStore` protocol — in-memory dict
-  today) + Redis for locks / idempotency keys; per-run budget isolation is already
-  in `BudgetState`; pool provider rate limits across workers with a token-bucket.
-- **OSS / self-hosted LLMs:** the `Provider` protocol behind `LLMClient` is the
-  only seam — add a `VLLMProvider` serving Llama/Mistral. The open question is
-  structured-output reliability without OpenAI strict mode: grammar-constrained
-  decoding (Outlines / llama.cpp GBNF) or a stricter repair loop. Cost/latency vs
-  a hosted model is a per-deployment call; the fake provider keeps tests free
-  regardless.
-- **Persistent workflow state:** swap the in-process driver for LangGraph with a
-  Postgres checkpointer — every node boundary becomes a resumable savepoint, so a
-  crashed or timed-out run continues instead of restarting, and human-in-the-loop
-  pause points (approve the search plan, review the shortlist) drop in as
-  interrupt nodes. `RunState` is already one Pydantic model, so it serialises
-  as-is.
-- **Production monitoring:** emit the structured log records (already keyed by
-  `run_id`) and the `RunTrace` counters (stage latencies, tool ok/fail, llm_calls,
-  tokens, cost) to OpenTelemetry → a metrics/traces backend. Dashboard the funnel
-  drop-off, p50/p95 latency, cost per run, abstention rate, `stop_reason`
-  breakdown; alert on drift in any of them (e.g. abstention rate spiking =
-  interpret regression).
-- **Model & prompt versioning:** move the prompts into a small registry with
-  content-hash version IDs; stamp `(interpret_prompt_id, validate_prompt_id,
-  model)` into `RunTrace` so every result is reproducible. Any prompt or model
-  change runs the held-out `eval/queries.yaml` as a CI gate and diffs the
-  deterministic columns + the parse against the previous version before merge.
-- **Production eval:** labelled golden sets, retrieval recall@k over a judged
-  candidate pool, an LLM-judge calibrated against human labels for the
-  non-deterministic columns (ranking quality, evidence sufficiency), online
-  feedback capture (thumbs / "not relevant" per result) feeding both the golden
-  set and drift alerts.
-- **Data lineage & governance:** an immutable run store; every evidence item
-  points to `(company_id, source_field, record_version)` so a claim can be traced
-  to the exact record it was drawn from; the interpret + validate prompts and
-  model versions are retained per run for audit; PII / access policy enforced at
-  the retrieval-tool boundary.
-- **MCP-compatible tools:** the three tool contracts are already Pydantic in/out
-  with no hidden state — wrap them as an MCP server so the same
-  `search_companies` / `count_matching` / `get_by_ids` serve other agents and
-  clients unchanged.
-
----
-
-## Decision Log
+## Design notes
 
 <details>
-<summary>The reasoning on record, in build order (D1–D18).</summary>
+<summary>The non-obvious choices.</summary>
 
-**D1 — Deterministic workflow, not autonomous agents.** The retrieval strategy is
-derivable from the parsed mandate, so an LLM planner adds failure modes
-(uncontrolled loops, unpredictable cost) without adding capability.
-
-**D2 — SQLite + FTS5.** Makes structured filters *be* SQL, bm25 for free,
-`count_matching` a one-liner; stdlib only. Alternative (README): ES + vector DB.
-
-**D3 — FTS5 only, no embeddings.** 1,308 distinct templated descriptions →
-keyword ≈ semantic. Alternative: `fastembed` local re-rank.
-
-**D4 — Region & revenue resolution are deterministic config, never LLM.**
-`regions.yaml`, a bucket parser; unknown region terms → recorded as ambiguity,
-not guessed.
-
-**D5 — `schema_map.yaml` indirection** so ingestion isn't hard-wired to 8 fields.
-
-**D6 — Tools return `SearchResult`, not a bare list** — exclusion bookkeeping
-(Q3 "matched nothing", S3 "removed N") must survive the tool boundary.
-
-**D7 — Preferences can never reach a retrieval tool** — enforced by the type.
-
-**D8 — One `LLMClient` seam; fake provider is the test default.** Repair retry,
-`Retry-After` backoff, provider-namespaced cache.
-
-**D9 — Few-shot the mandatory/preference split.** gpt-4o-mini kept classifying
-"preferably founded after 2018" as mandatory and emitting `0` for unset bounds;
-two worked examples fixed both. Cheaper than escalating to `gpt-4o`.
-
-**D10 — Groundedness is a deterministic substring check, not a prompt
-instruction.** Failed quote → demoted to inference.
-
-**D11 — Revision is a deterministic ladder, bounded to 1.** Q4 specifies the rule
-itself.
-
-**D12 — `BudgetGuard` is the real bound, not the framework.** Checked at every
-node entry, both engines; breach → partial response, never an exception.
-
-**D12a — The narrowing funnel is reported explicitly** (`RunTrace.funnel`).
-
-**D13 — Custom driver first, LangGraph second, same signature.** A test asserts
-both engines agree.
-
-**D14 — Ranking: two fractions, a tiered sort, one readout.** The model reports
-per-capability / per-"serves" support (with a quote); everything else is code.
-Each result carries `mandatory_met/total` (all mandatory requirements —
-structural + capability + each `serves` phrase) and `preferences_met/total` (every
-miss named in `unmet_preferences`), plus a `score = 0.65·mand + 0.35·pref`
-**readout**.
-The **sort is tiered** — `(all mandatory met? → #mandatory → #preferences)` —
-then bm25 silently breaks an exact tie. No weights decide order. The model's own
-numeric score was tried and dropped (it clustered); bm25 got its own score-weight
-and column, also dropped (near-noise on templated text). `match_summary` counts
-the whole matched set (filters / meet-every-preference SQL count / LLM-confirmed)
-and flags `results_are_top_ranked = false` with a specific note when the returned
-rows are one tier of a larger set.
-
-**D14a — Results can exceed the validation batch.** `validation_batch` (10)
-bounds LLM cost; `result_limit` (default 10, up to 50 via `--limit` / the API
-`limit`) bounds what's returned. The whole retrieval pool is scored + sorted
-deterministically; rows past rank 10 come back `llm_validated: false`
-(keyword-matched, text not confirmed).
-
-**D14b — `serves` counts toward the mandate, and a customer adjective becomes a
-location preference.** A *"serves / sells to X"* phrase is a real mandatory
-requirement, so it's in `mandatory_total` — but the dataset has no customer field
-and descriptions omit customers, so it is almost always unmet: Q3 lands every row
-at `mand 3/4`, `full_match: false`, the gap in `inferences[]`, and a
-`metadata.caveats` entry explains why. Separately, a region word *inside* a
-`serves` phrase ("**European** banks") is added as a **location preference** (never
-a filter) by `build_search_plan` — the mandate never said where the *company* is,
-so European firms rank first without excluding anyone. (Earlier this phrase was
-mis-parsed into a hard `location IN (…)` filter; the interpret prompt now forbids
-that.)
-
-**D15 — Skip the validation call when there is nothing to validate.** A purely
-structural mandate ("Nordic medtech founded before 1996", "German energy, exclude
-smart grid") is fully answered by the SQL `WHERE` gate; the model would only
-rubber-stamp every row with empty evidence. So `validate_and_rank` detects the
-no-capability / no-"serves" / no-semantic-exclusion case, builds the ranking
-deterministically, and spends **zero** LLM calls. Keyword exclusions still apply
-(they run in SQL); a *semantic* exclusion category keeps the model in the loop.
-
-**D16 — Capability phrases contribute their industry.** "fraud-detection
-technology" — gpt-4o-mini variously calls that industry `Technology`, `Fintech`,
-or nothing. `build_search_plan` merges the lexicon-implied industry
-(`fraud detection` → `Fintech`) into the `industry IN (…)` set rather than
-treating it as a fallback. Broadening the set is recall-safe; the validator
-narrows on the text. Hyphenated compounds ("fraud-detection") are normalised to
-spaces before the lexicon lookup.
-
-**D17 — Vague quality words never become filters.** "innovative", "AI", "smaller
-/ newer", "tiny", "startup" carry no structured meaning here (every description
-is "AI-powered …"). The interpret prompt forbids turning one into a capability,
-an industry, or a fabricated numeric bound — it goes to `ambiguities`. Before this
-rule, "lean towards smaller, newer firms" produced an invented
-`founded_year_gte / employee_count_lte` pair.
-
-**D18 — The interpret prompt carries the dataset's topic vocabulary.** The 10
-industries were already a closed list in the prompt; the 27 core topic phrases
-(`data/dataset_vocab.json`, injected as `_TOPICS`) now are too, as a *soft* target
-("map to the closest 1–3 when one clearly fits, else keep the phrase + note an
-ambiguity"). This shifts synonym normalisation ("cancer research" → drug
-discovery + molecular analysis) to parse time, so fewer feasible queries hit an
-empty topic match. Soft, not `MUST`: a genuinely absent capability
-("quantum cryptography") is better left unmapped (→ honest thin result) than
-forced onto a wrong topic. The lexicon stays as the deterministic backstop and
-also seeds the industry from a topic. A few-shot example plus `cancer` / `oncology`
-lexicon entries pin the one case gpt-4o-mini resisted.
+- **Deterministic workflow, not an agent.** The retrieval strategy is derivable
+  from the parsed mandate, so an LLM planner would add failure modes (loops,
+  cost) without capability. It is still plan → act → observe → adapt — the
+  controller is just Python.
+- **SQLite + FTS5, no embeddings.** Structured filters *are* SQL; bm25 comes free;
+  `count_matching` is one line; stdlib only. The 27 templated topics make keyword
+  ≈ semantic. At scale: Elasticsearch + a vector DB.
+- **Preferences are type-locked out of retrieval.** `search_companies` accepts
+  only `StructuredFilters`, so a preference cannot become a hard filter even by
+  mistake.
+- **`serves` counts toward the mandate but is usually unmet** on this data (no
+  customer field). Reporting `3/4` + a caveat is more honest than silently
+  dropping the requirement or fabricating a match.
+- **The validation call is skipped when there is nothing to judge** — a purely
+  structural mandate is fully answered by the SQL gate, so the model would only
+  rubber-stamp rows. 0 tokens.
+- **`result_limit` (default 10, up to 50) is separate from the validation batch
+  (10).** The batch bounds LLM cost; rows past rank 10 come back
+  `llm_validated: false`, keyword-matched only.
+- **The interpret prompt carries the 27-topic vocabulary** as a *soft* target, so
+  synonyms map at parse time; a genuinely absent capability is left unmapped
+  rather than forced onto a wrong topic.
+- **Custom driver first, LangGraph second, same node functions.** A test asserts
+  both engines agree. See "Orchestration" for why the framework is optional here.
 
 </details>
