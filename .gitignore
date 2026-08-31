@@ -1,10 +1,18 @@
-# --- assessment working files (never committed to the submission repo) ---
+# --- planning / scratch files (not part of the repo) ---
 PLAN.md
 dumbplan.md
 jd.txt
 input.txt
 lessons.md
 data/companies.csv     # unused duplicate of companies.json
+
+# superseded eval walkthroughs + internal reviews (keep only eval/eval6.txt)
+eval/eval1.md
+eval/eval2.txt
+eval/eval3.txt
+eval/eval4.txt
+eval/eval5dev.txt
+eval/code_review*
 
 # --- secrets ---
 .env

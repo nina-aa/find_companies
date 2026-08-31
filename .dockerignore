@@ -12,13 +12,18 @@ tests/
 .vscode/
 .idea/
 
-# assessment working files — must never ship
+# planning / scratch files — not part of the runtime
 PLAN.md
 jd.txt
 input.txt
 lessons.md
+dumbplan.md
 .env
 
-# docs that aren't the runtime
+# docs / working notes that aren't the runtime
 *.md
 !README.md
+eval/eval*.txt
+eval/eval*.md
+eval/code_review*
+eval/RESULTS*.md

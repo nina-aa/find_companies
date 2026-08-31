@@ -1,10 +1,10 @@
 # Single self-contained image: builds the SQLite/FTS5 index at build time and
-# serves the FastAPI app. Targets Hugging Face Spaces (Docker SDK, port 7860)
-# but runs anywhere.
+# serves the FastAPI app. Runs anywhere that takes a container (Render, Cloud Run,
+# a plain docker host); the process listens on $PORT (default 7860).
 
 FROM python:3.12-slim
 
-# HF Spaces runs the container as a non-root user (uid 1000).
+# Run as a non-root user (uid 1000).
 RUN useradd -m -u 1000 appuser
 WORKDIR /app
 
@@ -17,9 +17,10 @@ COPY --chown=appuser:appuser data/companies.json ./data/companies.json
 
 USER appuser
 
-# Build the retrieval index into the image so the container is self-contained
-# and starts instantly.
+# Build the retrieval index + regenerate the dataset vocab into the image, so the
+# container is self-contained and starts instantly.
 RUN python -m app.ingest --input data/companies.json \
+ && python -m app.profile_dataset \
  && python -c "import json; m=json.load(open('data/index/manifest.json')); assert m['row_count']==50000"
 
 ENV LLM_PROVIDER=openai \

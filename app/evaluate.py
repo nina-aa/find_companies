@@ -1,4 +1,4 @@
-"""Assessment-level evaluation harness.
+"""End-to-end evaluation harness.
 
 Runs each query in ``eval/queries.yaml`` through ``run_workflow`` and scores the
 **deterministic** columns against the hand-authored ``expected`` block: parsed
@@ -6,8 +6,8 @@ criteria, mandatory-filter correctness (re-checked against the DB), dataset
 membership, evidence grounding, revision flag, correct abstention, budget
 adherence. Ranking quality / evidence sufficiency stay a manual column.
 
-A correct abstention (Q5: ``results == []`` + reason, ``should_be_empty: true``)
-scores as PASS (lesson 11).
+A correct abstention (results == [] + reason when ``should_be_empty: true``)
+scores as PASS — abstaining on an infeasible mandate is the right answer.
 """
 
 from __future__ import annotations

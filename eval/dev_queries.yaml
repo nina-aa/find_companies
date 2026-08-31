@@ -1,13 +1,12 @@
-# Development query set — self-authored, used for ALL iteration in M3–M4.
+# Development query set — used for all iteration during the build.
 #
-# The 5 required queries (+ S1/S3) in queries.yaml are HELD OUT: run them once at the
-# end of M3 as a direction check (look, don't tune), then not again until the final
-# M5 evaluation. This set carries the development load so the final RESULTS.md numbers
-# reflect generalisation, not fitting to the required strings.
+# The scored set in queries.yaml is held back and run at the end, so RESULTS.md
+# reflects generalisation rather than fitting to those exact strings. This set
+# carries the development load.
 #
 # Each entry has a `purpose` (which capability it exercises + rough expectation), not a
 # full `expected` block — flesh those out only if you want assertions during dev.
-# Counts below were checked against companies.json (Aug 2026); re-verify with
+# Counts below were checked against companies.json; re-verify with
 # `app.cli db "SELECT ..."` if the file changes.
 
 D1:

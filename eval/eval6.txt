@@ -1,0 +1,228 @@
+EVALUATION WALKTHROUGH  -  full output per query
+================================================================================================
+Generated 2026-08-31 against the workflow (gpt-4o-mini, real API, --no-cache).
+`python -m app.cli eval` scores the deterministic checks; this file shows the ranked
+results a reader actually sees, plus the one-line judgement from queries.yaml.
+
+Columns: score = 0.65*(mandatory fit) + 0.35*(preference fit), a readout only.
+  mand = mandatory requirements met / total (location, industry, each numeric bound,
+  each exclusion, the capability group, AND each `serves` phrase).  pref = soft
+  preferences met / total.  Sort is tiered: all-mandatory-met -> #mandatory -> #pref.
+  Supplements are S1 and S3.
+
+================================================================================================
+Q1   Find fintech companies in Finland working on fraud detection or banking analytics. Prefer companies founded after 2015 with fewer than 250 employees.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'countries': ['Finland'], 'industries': ['Fintech'], 'capabilities_any': ['fraud detection', 'banking analytics']}
+  preferences : {'founded_year_gte': 2016, 'employee_count_lte': 249}
+  SQL WHERE   : c.industry IN (?) AND c.location IN (?)   ['Fintech', 'Finland']
+  topic_terms : ['fraud detection', 'banking analytics'] (mode any)
+  plan prefs  : {'founded_year_gte': 2016, 'employee_count_lte': 249}
+  budget      : 2 LLM call(s), $0.00158, 12000 ms, revision=False
+
+   #  score  mand  pref  company                    loc          founded    emp  evidence / why
+  --  -----  ----  ----  -------------------------- ------------ -------  -----  ------------------------------------------------------------
+   1   1.00  3/3   2/2   Nordic Fintech Solutions   Finland         2018    240  "AI-powered platform for fraud detection, banking analytics, and risk assessment."
+   2   1.00  3/3   2/2   Martinez-Branch            Finland         2018    210  "automated engine for banking analytics."
+   3   1.00  3/3   2/2   Nelson PLC                 Finland         2019     29  "cloud-native system for fraud detection."
+   4   1.00  3/3   2/2   Kennedy, Walker and Willia Finland         2020     29  "distributed solution for banking analytics."
+   5   1.00  3/3   2/2   Barber, Brooks and Cole    Finland         2021    118  "real-time infrastructure for banking analytics."
+   6   0.82  3/3   1/2   Pham-Farley                Finland         2017   2714  "automated system for fraud detection."   miss: more than 249 employees
+   7   0.82  3/3   1/2   Porter-Moore               Finland         2024   4408  "predictive infrastructure for fraud detection."   miss: more than 249 employees
+   8   0.82  3/3   1/2   Flores LLC                 Finland         2020   1237  "predictive system for fraud detection."   miss: more than 249 employees
+   9   0.82  3/3   1/2   Sandoval PLC               Finland         2017    949  "automated system for fraud detection."   miss: more than 249 employees
+  10   0.82  3/3   1/2   Noble Ltd                  Finland         2006     88  "distributed infrastructure for fraud detection."   miss: founded before 2016
+
+  MATCH SUMMARY
+    match structured + topic filters : 304
+      of those, meet every preference: 5
+    sent to LLM validation           : 10 (10 full, 0 with a text/serves gap)
+    returned                         : 10  (top of the ranking)
+
+  JUDGEMENT: 5 of 304 filter-matches meet every preference, and all 5 now reach the top of the list (the retrieve step runs a preference-boosted second search so they survive the bm25 cut). Ranks 6-10 are pref 1/2, score 0.82, with the missed preference named.
+
+================================================================================================
+Q2   Find Nordic companies working on energy forecasting. Companies must operate in the energy sector. Prefer companies with 50-250 employees, but treat employee count as a preference rather than a mandatory requirement.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'regions': ['Nordic'], 'industries': ['Energy'], 'capabilities_any': ['energy forecasting']}
+  preferences : {'employee_count_gte': 50, 'employee_count_lte': 250}
+  SQL WHERE   : c.industry IN (?) AND c.location IN (?, ?, ?)   ['Energy', 'Finland', 'Norway', 'Sweden']
+  topic_terms : ['energy forecasting', 'forecasting'] (mode any)
+  plan prefs  : {'employee_count_gte': 50, 'employee_count_lte': 250}
+  budget      : 2 LLM call(s), $0.00159, 10563 ms, revision=False
+  ranking     : 25 companies meet every requirement and preference; the 10 returned are an arbitrary slice — add a preference (size, recency, a narrower capability) to rank within them
+
+   #  score  mand  pref  company                    loc          founded    emp  evidence / why
+  --  -----  ----  ----  -------------------------- ------------ -------  -----  ------------------------------------------------------------
+   1   1.00  3/3   2/2   Foster-Duncan              Sweden          2022    229  "distributed infrastructure for energy forecasting."
+   2   1.00  3/3   2/2   Little-Nelson              Finland         2013     63  "predictive software for energy forecasting."
+   3   1.00  3/3   2/2   Jackson-Massey             Norway          2012    214  "distributed infrastructure for energy forecasting."
+   4   1.00  3/3   2/2   Johnson PLC                Sweden          2015    217  "automated solution for energy forecasting."
+   5   1.00  3/3   2/2   Ramirez Inc                Norway          1995    151  "predictive platform for energy forecasting."
+   6   1.00  3/3   2/2   Morales Inc                Norway          2008    184  "automated solution for energy forecasting."
+   7   1.00  3/3   2/2   Little Inc                 Norway          2012    120  "distributed software for energy forecasting."
+   8   1.00  3/3   2/2   Jones-Roberts              Finland         2008    108  "predictive solution for energy forecasting."
+   9   1.00  3/3   2/2   Black-Cox                  Sweden          2021    180  "predictive engine for energy forecasting."
+  10   1.00  3/3   2/2   Fields Group               Sweden          1999    147  "data-driven platform for energy forecasting."
+
+  MATCH SUMMARY
+    match structured + topic filters : 665
+      of those, meet every preference: 25
+    sent to LLM validation           : 10 (10 full, 0 with a text/serves gap)
+    returned                         : 10  (ARBITRARY SLICE)
+
+  JUDGEMENT: The recall fix at work: 25 of 665 meet the 50-250 employee band, and all 10 returned are from that set (pref 2/2, score 1.00). The summary reports 25 and flags the returned 10 as an arbitrary slice of them.
+
+================================================================================================
+Q3   Find companies that directly provide fraud-detection technology to European banks. Exclude general cybersecurity consultancies and explain the evidence that each selected company serves financial institutions.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'industries': ['Fintech'], 'capabilities_any': ['fraud detection'], 'serves': ['European banks']}
+  preferences : {}
+  exclusions  : {'keywords': ['cybersecurity consultancies']}
+  ambiguity   : no company location stated; 'European' describes the customers, not the company
+  ambiguity   : evidence of serving financial institutions is not specified in the mandate
+  SQL WHERE   : c.industry IN (?)   ['Fintech']
+  topic_terms : ['fraud detection'] (mode any)
+  plan prefs  : {'regions': ['european']}
+  serves      : ['European banks']  (mandatory; unverifiable on this dataset — see caveats)
+  budget      : 2 LLM call(s), $0.00159, 10125 ms, revision=False
+  CAVEAT      : the mandate asks about a customer / market (serves: European banks) — this dataset has no customer field and the one-sentence descriptions do not name customers, so that requirement cannot be verified. Results match the other criteria; any customer mention found is recorded as evidence but not scored.
+  ranking     : 1061 companies meet every preference (and every verifiable requirement); the 10 returned are an arbitrary slice — add a preference (size, recency, a narrower capability) to rank within them
+
+   #  score  mand  pref  company                    loc          founded    emp  evidence / why
+  --  -----  ----  ----  -------------------------- ------------ -------  -----  ------------------------------------------------------------
+   1   0.84  3/4   1/1   Johnson-Carlson            France          2009   1672  "predictive engine for fraud detection."   -> serves: European banks unverified
+   2   0.84  3/4   1/1   Hernandez Inc              Germany         2009   3816  "predictive infrastructure for fraud detection."   -> serves: European banks unverified
+   3   0.84  3/4   1/1   Hernandez Ltd              Netherlands     2002   4972  "automated software for fraud detection."   -> serves: European banks unverified
+   4   0.84  3/4   1/1   Robinson-Brock             Germany         2024   4752  "distributed infrastructure for fraud detection."   -> serves: European banks unverified
+   5   0.84  3/4   1/1   Monroe-Carpenter           Finland         2013   4894  "automated software for fraud detection."   -> serves: European banks unverified
+   6   0.84  3/4   1/1   Castaneda-Rodriguez        Germany         1996   3248  "predictive platform for fraud detection."   -> serves: European banks unverified
+   7   0.84  3/4   1/1   Lee-Cooke                  Germany         2009   3317  "automated engine for fraud detection."   -> serves: European banks unverified
+   8   0.84  3/4   1/1   Walker-Flores              Germany         2024   1496  "distributed engine for fraud detection."   -> serves: European banks unverified
+   9   0.84  3/4   1/1   Whitney PLC                UK              1996    944  "distributed system for fraud detection."   -> serves: European banks unverified
+  10   0.84  3/4   1/1   Lopez-Willis               Netherlands     2023   4551  "predictive solution for fraud detection."   -> serves: European banks unverified
+
+  MATCH SUMMARY
+    match structured + topic filters : 1222
+      of those, meet every preference: 1061
+    sent to LLM validation           : 10 (0 full, 10 with a text/serves gap)
+    returned                         : 10  (ARBITRARY SLICE)
+
+  JUDGEMENT: No mandatory country filter (correct — the mandate never says where the company is). Europe is a location preference, so European fraud-detection Fintechs rank first. Every row is mand 3/4: industry + capability met, 'serves European banks' unverifiable and labelled an inference + caveat. Exclusion matches nothing (correctly).
+
+================================================================================================
+Q4   Identify German drug-discovery companies, preferably founded after 2018. If fewer than three strong matches exist, broaden the founding-year preference, but do not broaden the country or drug-discovery requirements.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'countries': ['Germany'], 'industries': ['Biotech'], 'capabilities_any': ['drug discovery']}
+  preferences : {'founded_year_gte': 2019}
+  ambiguity   : Preference to broaden founding year if fewer than three strong matches exist is not structured as a filter.
+  SQL WHERE   : c.industry IN (?) AND c.location IN (?)   ['Biotech', 'Germany']
+  topic_terms : ['drug discovery'] (mode any)
+  plan prefs  : {'founded_year_gte': 2019}
+  budget      : 2 LLM call(s), $0.00138, 7936 ms, revision=False
+  ranking     : 53 companies meet every requirement and preference; the 10 returned are an arbitrary slice — add a preference (size, recency, a narrower capability) to rank within them
+
+   #  score  mand  pref  company                    loc          founded    emp  evidence / why
+  --  -----  ----  ----  -------------------------- ------------ -------  -----  ------------------------------------------------------------
+   1   1.00  3/3   1/1   Stephens Ltd               Germany         2019   4134  "predictive software for drug discovery."
+   2   1.00  3/3   1/1   Barrera Ltd                Germany         2021   4046  "automated system for drug discovery."
+   3   1.00  3/3   1/1   Mcintyre-Hull              Germany         2019   2193  "predictive platform for drug discovery."
+   4   1.00  3/3   1/1   Martinez Ltd               Germany         2021   3433  "distributed infrastructure for drug discovery."
+   5   1.00  3/3   1/1   Cook LLC                   Germany         2020   2960  "distributed solution for drug discovery."
+   6   1.00  3/3   1/1   Campbell-Powell            Germany         2019   2451  "distributed engine for drug discovery."
+   7   1.00  3/3   1/1   Molina-Willis              Germany         2020   1843  "automated platform for drug discovery."
+   8   1.00  3/3   1/1   Wilson-Foster              Germany         2024   4281  "predictive engine for drug discovery."
+   9   1.00  3/3   1/1   Fox PLC                    Germany         2024   1866  "automated engine for drug discovery."
+  10   1.00  3/3   1/1   Ponce-Gomez                Germany         2023   4386  "distributed platform for drug discovery."
+
+  MATCH SUMMARY
+    match structured + topic filters : 219
+      of those, meet every preference: 53
+    sent to LLM validation           : 10 (10 full, 0 with a text/serves gap)
+    returned                         : 10  (ARBITRARY SLICE)
+
+  JUDGEMENT: 219 German Biotech drug-discovery firms, no revision. 'founded after 2018' is a preference: the preference-boosted retrieval surfaces founded>=2019 firms (pref 1/1, score 1.00) above older ones (pref 0/1, score 0.65).
+
+================================================================================================
+Q5   Find Finnish fintech companies founded after 2022 with more than 5,000 employees and revenue below EUR 10 million.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'countries': ['Finland'], 'industries': ['Fintech'], 'founded_year_gte': 2023, 'employee_count_gte': 5001, 'revenue_eur_lte': 10000000}
+  preferences : {}
+  SQL WHERE   : c.industry IN (?) AND c.location IN (?) AND c.founded_year >= ? AND c.employee_count >= ? AND c.revenue_range IN (?, ?)   ['Fintech', 'Finland', 2023, 5001, '0-1M', '1M-10M']
+  budget      : 1 LLM call(s), $0.00059, 2594 ms, revision=False
+
+  RESULT: EMPTY -- no companies satisfy the mandatory criteria: industry in Fintech; location in Finland; founded >= 2023; employees >= 5001; revenue <= EUR 10,000,000
+
+
+  MATCH SUMMARY
+    match structured + topic filters : 0
+      of those, meet every preference: 0
+    sent to LLM validation           : 0  (purely structural — LLM skipped)
+    returned                         : 0  (top of the ranking)
+
+  JUDGEMENT: Correct abstention. employee_count max in the data is 5000, so >5000 is impossible; feasibility short-circuits after the interpret call only (1 LLM call).
+
+================================================================================================
+S1   Find German biotech companies working on gene editing, founded after 2020.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'countries': ['Germany'], 'industries': ['Biotech'], 'founded_year_gte': 2021, 'capabilities_all': ['gene editing']}
+  preferences : {}
+  SQL WHERE   : c.industry IN (?) AND c.location IN (?) AND c.founded_year >= ?   ['Biotech', 'Germany', 2021]
+  topic_terms : ['gene editing'] (mode all)
+  budget      : 2 LLM call(s), $0.00138, 6827 ms, revision=False
+  ranking     : 22 companies meet every requirement; the 10 returned are an arbitrary slice — add a preference (size, recency, a narrower capability) to rank within them
+
+   #  score  mand  pref  company                    loc          founded    emp  evidence / why
+  --  -----  ----  ----  -------------------------- ------------ -------  -----  ------------------------------------------------------------
+   1   1.00  4/4   0/0   Abbott-Ibarra              Germany         2024   2226  "automated system for gene editing."
+   2   1.00  4/4   0/0   Rodriguez-Campbell         Germany         2023   4178  "distributed platform for gene editing."
+   3   1.00  4/4   0/0   Taylor Ltd                 Germany         2022   3201  "automated infrastructure for gene editing."
+   4   1.00  4/4   0/0   Combs Ltd                  Germany         2021   3440  "distributed software for gene editing."
+   5   1.00  4/4   0/0   Gardner LLC                Germany         2024   1248  "automated platform for gene editing."
+   6   1.00  4/4   0/0   Good PLC                   Germany         2024    542  "data-driven infrastructure for gene editing."
+   7   1.00  4/4   0/0   Taylor Group               Germany         2022   2209  "AI-powered solution for gene editing."
+   8   1.00  4/4   0/0   Waters-Rodriguez           Germany         2022   2394  "data-driven software for gene editing."
+   9   1.00  4/4   0/0   Bass-Washington            Germany         2022    796  "cloud-native platform for gene editing."
+  10   1.00  4/4   0/0   Evans-Clark                Germany         2021    504  "machine learning system for gene editing."
+
+  MATCH SUMMARY
+    match structured + topic filters : 22
+      of those, meet every preference: 22
+    sent to LLM validation           : 10 (10 full, 0 with a text/serves gap)
+    returned                         : 10  (ARBITRARY SLICE)
+
+  JUDGEMENT: Tight real filter (German Biotech gene-editing founded >=2021, 22 rows). No preferences, so all 22 sit in one tier -> the 10 returned are flagged an arbitrary slice. mand 4/4 (location, industry, founded>=2021, gene-editing).
+
+================================================================================================
+S3   Find energy companies in Germany, but exclude anything working on smart grid.
+------------------------------------------------------------------------------------------------
+  mandatory   : {'countries': ['Germany'], 'industries': ['Energy']}
+  preferences : {}
+  exclusions  : {'industries': ['smart grid']}
+  SQL WHERE   : c.industry IN (?) AND c.location IN (?)   ['Energy', 'Germany']
+  budget      : 1 LLM call(s), $0.00059, 2875 ms, revision=False
+  ranking     : 614 companies meet every requirement; the 10 returned are an arbitrary slice — add a preference (size, recency, a narrower capability) to rank within them
+
+   #  score  mand  pref  company                    loc          founded    emp  evidence / why
+  --  -----  ----  ----  -------------------------- ------------ -------  -----  ------------------------------------------------------------
+   1   1.00  3/3   0/0   Guzman, Hoffman and Baldwi Germany         2006   2762  (structural — no text criterion)
+   2   1.00  3/3   0/0   Taylor and Sons            Germany         2012   2710  (structural — no text criterion)
+   3   1.00  3/3   0/0   Giles Ltd                  Germany         2011    279  (structural — no text criterion)
+   4   1.00  3/3   0/0   Ali PLC                    Germany         2018   3067  (structural — no text criterion)
+   5   1.00  3/3   0/0   Goodwin Ltd                Germany         2004   1214  (structural — no text criterion)
+   6   1.00  3/3   0/0   Fuentes Group              Germany         2010    481  (structural — no text criterion)
+   7   1.00  3/3   0/0   Burns-Ray                  Germany         2022   4915  (structural — no text criterion)
+   8   1.00  3/3   0/0   Hernandez Group            Germany         2014    238  (structural — no text criterion)
+   9   1.00  3/3   0/0   Johnson, Guzman and Mccall Germany         2000   2508  (structural — no text criterion)
+  10   1.00  3/3   0/0   Ruiz Ltd                   Germany         2002    157  (structural — no text criterion)
+
+  MATCH SUMMARY
+    match structured + topic filters : 614
+      of those, meet every preference: 614
+    sent to LLM validation           : 0  (purely structural — LLM skipped)
+    returned                         : 10  (ARBITRARY SLICE)
+
+  JUDGEMENT: Non-vacuous exclusion: 421 of 614 German Energy firms remain after removing 'smart grid'. Purely structural + keyword exclusion -> LLM validation skipped (1 LLM call total). mand 3/3 (location, industry, not-smart-grid).
+
+================================================================================================
+TOTAL COST: $0.00869

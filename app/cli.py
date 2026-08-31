@@ -1,17 +1,17 @@
-"""Command-line entry point — the primary test surface for the system.
+"""Command-line entry point — the primary way to drive and inspect the system.
 
-Subcommands land as their dependencies are built:
+Subcommands:
 
-* ``ingest``  (M1) — build the retrieval index.
-* ``db``      (M1) — run a raw ``SELECT`` against the index for sanity checks.
-* ``search``  (M2) — exercise the retrieval tools directly (no LLM), for checking
-                     filter / FTS / exclusion behaviour by hand.
-* ``check``   (M3) — interpret + plan + feasibility only (1 LLM call).
-* ``run``     (M4) — full workflow.
-* ``eval``    (M4) — run the eval query set and write RESULTS.md.
+* ``ingest`` — build the retrieval index.
+* ``db``     — run a raw ``SELECT`` against the index for sanity checks.
+* ``search`` — exercise the retrieval tools directly (no LLM), for checking
+               filter / FTS / exclusion behaviour by hand.
+* ``check``  — interpret + plan + feasibility only (1 LLM call).
+* ``run``    — full workflow.
+* ``eval``   — run the eval query set and write RESULTS.md.
 
 Everything except ``ingest`` / ``db`` is a thin wrapper over
-``run_workflow(query, cfg)``, added later.
+``run_workflow(query, cfg)``.
 """
 
 from __future__ import annotations
@@ -101,12 +101,17 @@ def _cmd_check(args: argparse.Namespace) -> int:
     print("  exclusions :", c.exclusions.model_dump(exclude_defaults=True) or "{}")
     print("  semantic   :", repr(c.semantic_focus))
     if c.ambiguities:
+        print("\nAMBIGUITIES (recorded, not applied as filters)")
         for a in c.ambiguities:
-            print("  ambiguity  :", a)
+            print("  -", a)
     print("\nSEARCH PLAN")
     where, params = p.filters.to_sql()
     print("  SQL WHERE  :", where, "  params:", params)
     print("  topic_terms:", p.topic_terms, f"(mode={p.topic_mode})")
+    if p.preferences.model_dump(exclude_defaults=True):
+        print("  preferences:", p.preferences.model_dump(exclude_defaults=True))
+    if p.serves:
+        print("  serves     :", p.serves, "(mandatory; unverifiable on this dataset)")
     print("  exclusions :", p.exclusions.model_dump(exclude_defaults=True) or "{}")
     if p.notes:
         for n in p.notes:
@@ -136,6 +141,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         use_cache=not args.no_cache,
         min_results=args.min_results,
         deadline_s=args.deadline_s,
+        result_limit=args.limit,
         engine=args.engine,
     )
     response, state = run_workflow(args.mandate, cfg, db_path=args.db)
@@ -160,8 +166,10 @@ def _print_run(response, state, *, explain: bool, verbose: bool) -> None:
     print("  preferences:", c.preferences.model_dump(exclude_defaults=True) or "{}")
     if c.exclusions.model_dump(exclude_defaults=True):
         print("  exclusions :", c.exclusions.model_dump(exclude_defaults=True))
-    for a in c.ambiguities:
-        print("  ambiguity  :", a)
+    if response.ambiguities:
+        print("\nAMBIGUITIES (recorded, not applied as filters)")
+        for a in response.ambiguities:
+            print("  -", a)
 
     p = response.search_plan
     where, params = p.filters.to_sql()
@@ -201,11 +209,16 @@ def _print_run(response, state, *, explain: bool, verbose: bool) -> None:
     print(f"\nRESULTS ({len(response.results)})")
     if response.empty_reason:
         print("  (empty)", response.empty_reason)
+    if m.ranking_note:
+        print("  ! ", m.ranking_note)
+    for cav in m.caveats:
+        print("  caveat:", cav)
     for item in response.results:
-        pset = "" if not item.unmet_preferences else f" −{len(item.unmet_preferences)}pref"
-        print(f"  #{item.rank} {item.name}  [{item.verdict} rel={item.relevance_score:.2f}"
-              f"{pset}]  {item.location}/{item.industry}  founded={item.founded_year} "
-              f"emp={item.employee_count}")
+        tag = "" if item.llm_validated else "  (not text-validated)"
+        print(f"  #{item.rank:>2} score={item.score:.2f}  mand {item.mandatory_met}/{item.mandatory_total}"
+              f"  pref {item.preferences_met}/{item.preferences_total}  "
+              f"{item.name}  {item.location}/{item.industry}  "
+              f"f={item.founded_year} e={item.employee_count}{tag}")
         if explain:
             for e in item.evidence:
                 print(f"      evidence  ({e.source_field}): \"{e.quote}\"  <- {e.requirement}")
@@ -214,10 +227,15 @@ def _print_run(response, state, *, explain: bool, verbose: bool) -> None:
             for u in item.unmet_preferences:
                 print(f"      unmet pref: {u}")
 
-    vo = m.validation_outcome
-    print(f"\n{m.candidates_validated} validated -> "
-          f"{vo.get('matched', 0)} match / {vo.get('partial', 0)} partial / "
-          f"{vo.get('rejected', 0)} rejected")
+    ms = m.match_summary
+    print(f"\nMATCH SUMMARY")
+    print(f"  match structured + topic filters : {ms.matched_filters}")
+    print(f"    of those, meet every preference: {ms.matched_all_preferences}")
+    print(f"    meet requirements, miss a pref : {ms.matched_some_preferences}")
+    print(f"  sent to LLM validation          : {ms.sent_to_validation}  "
+          f"({ms.validated_full} full, {ms.validated_gap} with a text/serves gap)")
+    print(f"  returned                        : {ms.returned}  "
+          f"({'top of the ranking' if ms.results_are_top_ranked else 'ARBITRARY SLICE'})")
     print(f"llm_calls={m.llm_calls} (attempts={m.llm_attempts}, cache_hits={m.cache_hits}, "
           f"repairs={state.trace.repairs})  tokens={m.prompt_tokens}+{m.completion_tokens}  "
           f"est_cost=${m.est_cost_usd:.5f}  latency={m.latency_ms}ms")
@@ -361,6 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_r.add_argument("--trace", action="store_true", help="full RunTrace JSON")
     p_r.add_argument("--no-cache", action="store_true")
     p_r.add_argument("--min-results", type=int, default=3, help="revision trigger threshold")
+    p_r.add_argument("--limit", type=int, default=10,
+                     help="results to return (>10 appends deterministic-only rows)")
     p_r.add_argument("--deadline-s", type=float, default=90.0)
     p_r.add_argument("--db", default=ingest_mod.DEFAULT_DB)
     p_r.set_defaults(func=_cmd_run)

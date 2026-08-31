@@ -11,13 +11,32 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from app import config
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INPUT = REPO_ROOT / "data" / "companies.json"
 DEFAULT_OUTPUT = REPO_ROOT / "data" / "PROFILE.md"
+DEFAULT_VOCAB = REPO_ROOT / "data" / "dataset_vocab.json"
 
-# The description template observed in PLAN.md:
-#   "{AI-powered|data-driven|cloud-native} {platform|engine|software} for {topics}."
+# The description template:
+#   "{adjective} {noun} for {topic phrase}."
+# e.g. "AI-powered engine for fraud detection."
 _TOPIC_SPLIT = re.compile(r",| and | & |/", flags=re.IGNORECASE)
+_TEMPLATE = re.compile(r"^(?P<adj>.+?) (?P<noun>\S+) for (?P<topic>.+?)\.?$")
+
+# A topic is "core vocabulary" if it appears at least this many times — below it,
+# the phrase is a one-off description of a single flagship company.
+_CORE_MIN = 50
+
+
+def _topic_covered(topic: str) -> bool:
+    """Does the lexicon map this topic phrase back to itself? (the deterministic
+    safety net + FTS seed both depend on this)."""
+    t = topic.strip().lower()
+    for hit in config.lookup_phrases(topic):
+        if hit.phrase.lower() in t and any(x.lower() == t for x in hit.topics):
+            return True
+    return False
 
 
 def _load(path: Path) -> list[dict]:
@@ -50,9 +69,19 @@ def build_profile(rows: list[dict]) -> str:
     descriptions = [r.get("description", "") for r in rows]
     distinct_desc = len(set(descriptions))
 
-    topics = Counter()
+    topics: Counter = Counter()
+    adjectives: Counter = Counter()
+    noun_heads: Counter = Counter()
     for desc in descriptions:
         topics.update(_extract_topics(desc))
+        m = _TEMPLATE.match(desc.strip())
+        if m and len(m.group("adj").split()) <= 2:      # skip the ~6 long flagship blurbs
+            adjectives[m.group("adj").lower()] += 1
+            noun_heads[m.group("noun").lower()] += 1
+
+    core_topics = sorted(t for t, c in topics.items() if c >= _CORE_MIN)
+    oddball_topics = sorted(t for t, c in topics.items() if c < _CORE_MIN)
+    uncovered = [t for t in core_topics if not _topic_covered(t)]
 
     # Cross-check: any company with >3000 employees in the bottom revenue bucket?
     big_and_poor = [
@@ -98,11 +127,39 @@ def build_profile(rows: list[dict]) -> str:
     lines.append("### `description`")
     lines.append("")
     lines.append(f"- distinct descriptions: **{distinct_desc:,}** of {n:,} rows")
-    lines.append(f"- top 30 topic phrases (after `for ` in the template):")
+    lines.append(f"- template: `{{adjective}} {{noun}} for {{topic}}.`")
     lines.append("")
-    lines.append("| topic | count |")
-    lines.append("|---|---|")
-    lines.append(_fmt_counter(topics, 30))
+    lines.append(f"**Adjective prefixes — {len(adjectives)} distinct** "
+                 f"(pure filler, carry no meaning): "
+                 + ", ".join(f"`{a}`" for a, _ in adjectives.most_common()))
+    lines.append("")
+    lines.append(f"**Noun heads — {len(noun_heads)} distinct** "
+                 f"(stripped / ignored in capability parsing): "
+                 + ", ".join(f"`{h}`" for h, _ in noun_heads.most_common()))
+    lines.append("")
+    lines.append(f"**Core topic phrases — {len(core_topics)} distinct** "
+                 f"(≥ {_CORE_MIN} rows each). `lex` = the domain-phrase lexicon "
+                 f"([app/lexicon.yaml](../app/lexicon.yaml)) maps it back to itself "
+                 f"(deterministic safety net + FTS seed):")
+    lines.append("")
+    lines.append("| topic | count | lex |")
+    lines.append("|---|--:|:--:|")
+    for t in sorted(core_topics, key=lambda x: -topics[x]):
+        lines.append(f"| `{t}` | {topics[t]} | {'✅' if _topic_covered(t) else '❌'} |")
+    lines.append("")
+    if uncovered:
+        lines.append(f"> ⚠️ **{len(uncovered)} core topic(s) NOT in the lexicon:** "
+                     + ", ".join(f"`{t}`" for t in uncovered)
+                     + " — add them to `app/lexicon.yaml`.")
+    else:
+        lines.append("> ✅ **Every core topic is in the lexicon.** "
+                     "`tests/test_lexicon.py::test_lexicon_covers_every_core_dataset_topic` "
+                     "locks this.")
+    lines.append("")
+    lines.append(f"**One-off phrasings — {len(oddball_topics)} distinct** "
+                 f"(< {_CORE_MIN} rows, single flagship companies, still FTS-indexed): "
+                 + ", ".join(f"`{t}`" for t in oddball_topics[:20])
+                 + (" …" if len(oddball_topics) > 20 else ""))
     lines.append("")
     lines.append("## Feasibility cross-checks (drive the eval expectations)")
     lines.append("")
@@ -125,7 +182,26 @@ def main(argv: list[str] | None = None) -> int:
     rows = _load(args.input)
     profile = build_profile(rows)
     args.output.write_text(profile, encoding="utf-8")
-    print(f"wrote {args.output} ({len(rows):,} rows profiled)")
+
+    # machine-readable vocab, consumed by tests/test_lexicon.py
+    descriptions = [r.get("description", "") for r in rows]
+    topics: Counter = Counter()
+    adjectives: Counter = Counter()
+    noun_heads: Counter = Counter()
+    for desc in descriptions:
+        topics.update(_extract_topics(desc))
+        m = _TEMPLATE.match(desc.strip())
+        if m and len(m.group("adj").split()) <= 2:      # skip the ~6 long flagship blurbs
+            adjectives[m.group("adj").lower()] += 1
+            noun_heads[m.group("noun").lower()] += 1
+    vocab = {
+        "core_topics": sorted(t for t, c in topics.items() if c >= _CORE_MIN),
+        "oddball_topics": sorted(t for t, c in topics.items() if c < _CORE_MIN),
+        "adjectives": sorted(adjectives),
+        "noun_heads": sorted(noun_heads),
+    }
+    DEFAULT_VOCAB.write_text(json.dumps(vocab, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {args.output} and {DEFAULT_VOCAB} ({len(rows):,} rows profiled)")
     return 0
 
 

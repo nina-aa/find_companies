@@ -169,9 +169,9 @@ class FakeProvider:
 def fabricate(model: type[BaseModel]):
     """Build a minimal schema-valid instance.
 
-    Rule (lesson 1): only supply a value for a field that is *genuinely required*
-    (no default and no default_factory). Never overwrite a field that has a
-    default — let Pydantic apply it.
+    Rule: only supply a value for a field that is *genuinely required* (no default
+    and no default_factory). Never overwrite a field that has a default — let
+    Pydantic apply it.
     """
     values: dict = {}
     for name, fld in model.model_fields.items():

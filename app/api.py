@@ -5,9 +5,10 @@
 deployed URL (every call spends real OpenAI budget); it is wallet-protection, not
 a security boundary.
 
-Two nested timeouts: BudgetGuard's per-run deadline (``AGENT_DEADLINE_S``, ~90s)
-returns a partial body with ``timed_out: true``; the outer HTTP timeout is the
-last-resort ceiling. Deadline < HTTP timeout, so the client always gets JSON.
+BudgetGuard's per-run deadline (``AGENT_DEADLINE_S``, ~90s) returns a partial body
+with ``timed_out: true`` rather than hanging; clients should set their own request
+timeout above that. No server-side HTTP request timeout is configured (uvicorn
+default), so the deadline is the effective bound.
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ app = FastAPI(title="Agentic Company Search", version="0.1.0")
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
-    min_results: int = 3
-    engine: str = "driver"
+    min_results: int = Field(default=3, ge=1, le=10)
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 def _check_key(x_api_key: str | None) -> None:
@@ -73,8 +74,8 @@ def agent_search(req: SearchRequest, x_api_key: str | None = Header(default=None
     cfg = RunConfig(
         provider="openai" if provider == "openai" else "fake",
         min_results=req.min_results,
+        result_limit=req.limit,
         deadline_s=deadline_s,
-        engine="graph" if req.engine == "graph" else "driver",
     )
     try:
         response, _ = run_workflow(req.query, cfg)

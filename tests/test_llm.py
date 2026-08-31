@@ -27,7 +27,7 @@ def test_fabricate_only_fills_genuinely_required_fields():
     obj = fabricate(Sample)
     assert obj.required_str == "fake-required_str"
     assert obj.required_int == 0
-    assert obj.with_default == "kept"          # default not clobbered (lesson 1)
+    assert obj.with_default == "kept"          # default not clobbered
     assert obj.with_factory == ["kept"]        # factory not clobbered
     assert obj.optional is None
 

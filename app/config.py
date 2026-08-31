@@ -12,6 +12,7 @@ structured criteria and this module validates / resolves them.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -127,6 +128,27 @@ def canonical_industry(value: str) -> str | None:
     return _INDUSTRY_BY_LOWER.get(value.strip().lower())
 
 
+@lru_cache(maxsize=1)
+def core_topics() -> tuple[str, ...]:
+    """The capability phrases that actually occur in companies.json (>= 50 rows
+    each). Written by ``python -m app.profile_dataset`` to
+    ``data/dataset_vocab.json``; falls back to the distinct topics declared in
+    ``lexicon.yaml`` if that artifact is absent (every core topic is in the
+    lexicon, so the fallback is complete)."""
+    path = REPO_ROOT / "data" / "dataset_vocab.json"
+    try:
+        topics = json.loads(path.read_text(encoding="utf-8"))["core_topics"]
+        if topics:
+            return tuple(topics)
+    except (OSError, KeyError, ValueError):
+        pass
+    seen: dict[str, None] = {}
+    for hit in lexicon().values():
+        for t in hit.topics:
+            seen.setdefault(t, None)
+    return tuple(seen)
+
+
 import re as _re
 
 # British -> American spelling for the -ise/-yse families only (safe: no false
@@ -177,8 +199,9 @@ def lexicon() -> dict[str, LexiconHit]:
 
 def lookup_phrases(text: str) -> list[LexiconHit]:
     """Every lexicon phrase that occurs as a substring of ``text`` (longest first).
-    Spelling is normalised first so British forms still match."""
-    lowered = normalise_spelling(text.lower())
+    Spelling and hyphenation are normalised first ("fraud-detection" -> "fraud
+    detection") so British and compound forms still match."""
+    lowered = normalise_spelling(text.lower()).replace("-", " ")
     hits = [hit for key, hit in lexicon().items() if key in lowered]
     hits.sort(key=lambda h: len(h.phrase), reverse=True)
     return hits

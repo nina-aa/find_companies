@@ -55,3 +55,28 @@ def test_interpret_mandate_real_call():
     assert state.trace.est_cost_usd > 0
     print(f"\nlive: {state.trace.prompt_tokens}+{state.trace.completion_tokens} tok, "
           f"${state.trace.est_cost_usd:.5f}, plan.industries={state.plan.filters.industries}")
+
+
+@pytest.mark.parametrize("query, expect_any", [
+    ("companies doing cancer research", {"drug discovery", "molecular analysis", "gene editing"}),
+    ("startups fighting financial fraud", {"fraud detection"}),
+    ("firms making supply chains more efficient",
+     {"route optimization", "supply chain visibility", "demand forecasting", "inventory planning"}),
+])
+def test_interpret_maps_synonyms_onto_known_topics(query, expect_any):
+    """Free-text capability phrasing the lexicon does not contain must still land
+    on the dataset's known topic vocabulary — via the interpret-prompt vocabulary
+    rule, or the lexicon safety net in build_search_plan. Either is fine; what
+    matters is that retrieval ends up querying a real topic, not an empty result."""
+    from app.llm import build_client
+    from app.nodes import NodeDeps, build_search_plan, interpret_mandate
+    from app.state import RunConfig, RunState
+
+    cfg = RunConfig(provider="openai", use_cache=False)
+    deps = NodeDeps(llm=build_client("openai", model=cfg.model, use_cache=False))
+    state = interpret_mandate(RunState(query=query, cfg=cfg), deps)
+    state = build_search_plan(state, deps)
+    m = state.criteria.mandatory
+    landed = (set(m.capabilities_any) | set(m.capabilities_all)
+              | set(state.plan.topic_terms))
+    assert landed & expect_any, f"{query!r} -> {landed}"

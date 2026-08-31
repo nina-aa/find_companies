@@ -54,9 +54,8 @@ def _after_feasibility(gs: GraphState) -> str:
 
 def _after_validate(gs: GraphState) -> str:
     rs = gs["rs"]
-    usable = sum(1 for r in rs.ranked if r.verdict in ("match", "partial"))
     needs_revision = (
-        usable < rs.cfg.min_results
+        len(rs.ranked) < rs.cfg.min_results
         and not rs.revision.performed
         and rs.budget.revisions < rs.budget.max_revisions
     )

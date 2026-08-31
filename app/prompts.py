@@ -8,10 +8,16 @@ import json
 
 from app import config
 from app.schemas import Candidate
-from app.state import MandateConstraints, MandateCriteria, MandateExclusions, SearchPlan
+from app.state import (
+    MandateConstraints,
+    MandateCriteria,
+    MandateExclusions,
+    SearchPlan,
+)
 
 _INDUSTRIES = ", ".join(sorted(config.INDUSTRIES))
 _REGIONS = ", ".join(sorted((config._regions_raw().get("regions") or {}).keys()))
+_TOPICS = ", ".join(f'"{t}"' for t in sorted(config.core_topics()))
 
 
 # --------------------------------------------------------------------------- #
@@ -42,8 +48,35 @@ Rules:
   A domain phrase maps to BOTH an industry AND a capability, e.g.
   "drug-discovery companies" -> industries:["Biotech"], capabilities_all:["drug discovery"];
   "fintech working on fraud detection" -> industries:["Fintech"], capabilities_all:["fraud detection"].
+  This holds for "<topic> companies" too: the topic stays a capability even when
+  it also implies the industry —
+  "renewable-energy companies" -> industries:["Energy"], capabilities_any:["renewable energy"]
+  (NOT just industries:["Energy"]).
   If a term has no matching industry (e.g. "cybersecurity"), leave `industries`
   empty and put it in capabilities or exclusions as appropriate.
+- `capabilities_any` / `capabilities_all` say what the company DOES. Map each to
+  the closest phrase(s) in this known capability set WHEN ONE CLEARLY FITS — pick
+  the 1-3 nearest, never a whole category:
+  {_TOPICS}.
+  - "cancer research"                 -> capabilities_any: ["drug discovery", "molecular analysis"]
+  - "fighting payment fraud"          -> capabilities_any: ["fraud detection"]
+  - "making supply chains efficient"  -> capabilities_any: ["supply chain visibility", "demand forecasting"]
+  When you expand one idea into several phrases use `capabilities_any` (the
+  company need only do one). If nothing in the set is close, keep the user's own
+  wording AND add a line to `ambiguities`
+  ("'quantum cryptography' has no close match in the known capability set").
+  Only emit a capability the user actually asked about — never invent one.
+- Vague quality words have NO structured meaning: "innovative", "leading",
+  "cutting-edge", "world-class", "AI", "AI-powered", "smart", "next-generation",
+  "disruptive", "small", "tiny", "large", "fast-growing", "high-growth",
+  "startup", "scale-up". Never turn one into a capability, an industry, or a
+  numeric bound, and never invent a threshold the mandate does not state. Note it
+  in `ambiguities` instead ("'innovative' is subjective — not applied as a filter").
+  This holds EVEN after "prefer" / "lean towards": "lean towards smaller, newer
+  firms" with no number -> emit NO founded_year / employee_count bound; capture
+  the direction in `semantic_focus` and record it in `ambiguities`.
+  "skip the tiny ones" / "not the big players" -> an ambiguity, NOT an exclusion
+  keyword. "AI" is never a capability or topic here — every company is AI-powered.
 - "X or Y" over a list field -> both go in capabilities_any (or the list); it is
   set membership, never a contradiction. "X and Y" -> capabilities_all.
 - Put revenue bounds in revenue_eur_gte / revenue_eur_lte as integer euros
@@ -53,8 +86,14 @@ Rules:
   clause a preference, even constraints stated as "after 2018" or "more than 100".
   Example: "preferably founded after 2018" -> preferences.founded_year_gte: 2019,
   and mandatory.founded_year_gte stays null.
-- `serves` holds customer/market phrases that are not structured fields
-  ("serves European banks" -> serves:["European banks"]).
+- `serves` holds customer/market phrases — WHO the company sells to, not where it
+  sits. "provides X to <customer>", "serves <customer>", "... for <customer>" ->
+  serves:["<customer>"] ONLY. Never copy the customer, or an adjective on it like
+  "European", into `countries`/`regions`. Put a country in `countries` only when
+  the mandate states the COMPANY itself is there:
+  "UK fintechs that serve European banks" -> countries:["UK"], serves:["European banks"];
+  "companies that provide fraud detection to European banks" -> serves:["European banks"],
+  countries:[] (no company location was given).
 - `semantic_focus`: a short phrase capturing the overall intent.
 - `ambiguities`: list anything genuinely unclear (vague size terms, unknown
   regions, whether a constraint is mandatory). Do not invent constraints to
@@ -88,6 +127,42 @@ _EXAMPLES: list[tuple[str, MandateCriteria]] = [
             semantic_focus="Nordic biotech companies working on gene editing",
         ),
     ),
+    (
+        "Retail tech companies in the Netherlands, but not ones focused on loyalty programs.",
+        MandateCriteria(
+            mandatory=MandateConstraints(countries=["Netherlands"], industries=["Retail"]),
+            exclusions=MandateExclusions(keywords=["loyalty programs"]),
+            semantic_focus="Dutch retail-tech companies, excluding loyalty-program work",
+        ),
+    ),
+    (
+        "Innovative fintech startups that provide fraud detection to European banks.",
+        MandateCriteria(
+            mandatory=MandateConstraints(
+                industries=["Fintech"], capabilities_any=["fraud detection"],
+                serves=["European banks"],
+            ),
+            ambiguities=[
+                "'innovative' and 'startup' are subjective — not applied as filters",
+                "no company location stated; 'European' describes the customers, not the company",
+            ],
+            semantic_focus="fintech companies providing fraud detection to European banks",
+        ),
+    ),
+    (
+        "Companies working on cancer research or precision oncology.",
+        MandateCriteria(
+            mandatory=MandateConstraints(
+                industries=["Biotech"],
+                capabilities_any=["drug discovery", "molecular analysis"],
+            ),
+            ambiguities=[
+                "'cancer research' / 'precision oncology' mapped to the nearest known "
+                "capabilities: drug discovery, molecular analysis",
+            ],
+            semantic_focus="biotech companies in cancer / oncology research",
+        ),
+    ),
 ]
 
 
@@ -106,8 +181,8 @@ def interpret_messages(query: str) -> list[dict]:
 # --------------------------------------------------------------------------- #
 VALIDATE_SYSTEM = """\
 For each candidate company, judge whether the record supports specific
-requirements, and extract evidence. You do NOT decide the overall verdict — that
-is computed from your findings.
+requirements, and extract evidence. You do NOT decide the ranking or an overall
+score — that is computed from your findings.
 
 Every candidate has ALREADY passed the structured filters (country, industry,
 numeric bounds); the `already_verified_do_not_recheck` block lists them. Ignore
@@ -118,7 +193,6 @@ those. Answer only what is asked:
 - `serves_to_check`: for EACH phrase, add one entry to `serves_findings`. Thin
   descriptions often will not state the customer — then `supported` is false with
   a short `note`.
-- `preferences_to_check`: for each, add a `preference_signals` entry.
 - If a list is empty, return an empty findings list for it. Never invent a
   requirement that was not given to you.
 
@@ -127,14 +201,13 @@ For every finding:
   "name"). If you cannot quote it, leave `quote` empty and use `note`. Never
   paraphrase inside `quote`.
 
-relevance_score: 0.0-1.0 — overall strength of fit including preferences.
-rationale: one sentence.
+rationale: one sentence on the overall fit.
 """
 
 
 def _candidate_block(cand: Candidate, plan: SearchPlan) -> dict:
     """What the model is told about one candidate — the record plus the
-    deterministic signals we already hold (lesson 10)."""
+    deterministic signals we already hold, so it does not re-derive them."""
     return {
         "candidate_id": cand.id,
         "record": {
@@ -157,8 +230,8 @@ def _candidate_block(cand: Candidate, plan: SearchPlan) -> dict:
             "at_least_one" if plan.topic_mode == "any" else "all"
         ),
         "serves_to_check": plan.serves,
-        "capability_terms_already_found_in_text": cand.matched_topics,
-        "preferences_to_check": plan.preferences.model_dump(exclude_defaults=True),
+        # a hint only — the FTS index already saw these phrases in the text
+        "hint_phrases_seen_by_keyword_search": cand.matched_topics,
     }
 
 

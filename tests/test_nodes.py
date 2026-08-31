@@ -17,7 +17,7 @@ from app.state import (
     CandidateJudgement,
     MandateConstraints,
     MandateCriteria,
-    PreferenceSignal,
+    MandateExclusions,
     RunConfig,
     RunState,
     TextFinding,
@@ -112,6 +112,32 @@ def test_plan_revenue_bounds_become_range(fixture_db):
     assert state.plan.filters.revenue.max_eur == 10_000_000
 
 
+def test_plan_serves_region_becomes_location_preference_not_filter(fixture_db):
+    state = _state()
+    state.criteria = MandateCriteria(
+        mandatory=MandateConstraints(industries=["Fintech"],
+                                     capabilities_any=["fraud detection"],
+                                     serves=["European banks"]),
+    )
+    state = build_search_plan(state, _deps(fixture_db))
+    assert not state.plan.filters.countries                      # never a hard filter
+    assert not state.plan.filters.resolved_locations()
+    assert "european" in [r.lower() for r in state.plan.preferences.regions]
+    assert any("location preference" in n for n in state.plan.notes)
+
+
+def test_plan_serves_region_not_added_when_company_location_given(fixture_db):
+    state = _state()
+    state.criteria = MandateCriteria(
+        mandatory=MandateConstraints(countries=["Finland"], industries=["Fintech"],
+                                     capabilities_any=["fraud detection"],
+                                     serves=["European banks"]),
+    )
+    state = build_search_plan(state, _deps(fixture_db))
+    assert state.plan.filters.countries == ["Finland"]
+    assert not state.plan.preferences.regions                    # company location was stated
+
+
 # --------------------------------------------------------------------------- #
 # check_feasibility
 # --------------------------------------------------------------------------- #
@@ -172,50 +198,164 @@ def _fraud_state(fixture_db):
 def test_validate_keeps_supported_capability_drops_rejected(fixture_db):
     state = _fraud_state(fixture_db)
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, relevance_score=0.9,
+        CandidateJudgement(candidate_id=1,
                            capability_findings=[_cap("fraud detection", quote="fraud detection")]),
         # id 3 explicitly judged unsupported -> FTS must not rescue it
-        CandidateJudgement(candidate_id=3, relevance_score=0.1,
+        CandidateJudgement(candidate_id=3,
                            capability_findings=[_cap("fraud detection", supported=False)]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
     assert [r.company.id for r in state.results] == [1]
-    assert state.results[0].verdict == "match"
+    m = state.results[0].match
+    assert m.mandatory_met == m.mandatory_total == 3   # location + industry + capability
     assert state.results[0].evidence[0].quote == "fraud detection"
 
 
 def test_validate_span_grounding_demotes_ungrounded_quote(fixture_db):
     state = _fraud_state(fixture_db)
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, relevance_score=0.8, capability_findings=[
+        CandidateJudgement(candidate_id=1, capability_findings=[
             _cap("fraud detection", quote="fraud detection"),
             _cap("banking analytics", quote="quantum blockchain casino"),
         ]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
-    r = state.results[0]
+    r = next(x for x in state.ranked if x.company.id == 1)
     assert [e.quote for e in r.evidence] == ["fraud detection"]
     assert any("quantum blockchain casino" in inf.basis for inf in r.inferences)
 
 
-def test_validate_serves_unmet_makes_partial_not_dropped(fixture_db):
+def test_preferences_met_fraction_and_ranking(fixture_db):
+    state = _state()
+    state.criteria = MandateCriteria(
+        mandatory=MandateConstraints(countries=["Finland"], industries=["Fintech"],
+                                     capabilities_any=["fraud detection"]),
+        preferences=MandateConstraints(founded_year_gte=2020),   # id 1 (2019) fails, id 3 (2021) passes
+    )
+    state = build_search_plan(state, _deps(fixture_db))
+    state = retrieve(state, _deps(fixture_db))
+    batch = ValidationBatch(judgements=[
+        CandidateJudgement(candidate_id=1,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
+        CandidateJudgement(candidate_id=3,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
+    ])
+    state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
+    by_id = {r.company.id: r for r in state.ranked}
+    assert (by_id[3].match.preferences_met, by_id[3].match.preferences_total) == (1, 1)
+    assert (by_id[1].match.preferences_met, by_id[1].match.preferences_total) == (0, 1)
+    assert by_id[1].unmet_preferences == ["founded before 2020"]
+    assert [r.company.id for r in state.results] == [3, 1]   # more preferences met ranks first
+
+
+def test_location_preference_is_scored_in_preference_fit(fixture_db):
+    state = _fraud_state(fixture_db)
+    state.plan.preferences = MandateConstraints(regions=["nordic"])   # FI/NO/SE
+    batch = ValidationBatch(judgements=[
+        CandidateJudgement(candidate_id=1,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
+    ])
+    state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
+    r = next(x for x in state.ranked if x.company.id == 1)
+    assert (r.match.preferences_met, r.match.preferences_total) == (1, 1)   # Finland ∈ Nordic
+
+
+def test_purely_structural_query_skips_the_llm(fixture_db):
+    state = _state()
+    state.criteria = MandateCriteria(
+        mandatory=MandateConstraints(countries=["Finland"], industries=["Fintech"])
+    )
+    state = build_search_plan(state, _deps(fixture_db))
+    state = retrieve(state, _deps(fixture_db))
+
+    calls = {"n": 0}
+
+    def handler(messages, model):
+        calls["n"] += 1
+        return ValidationBatch()
+
+    state = validate_and_rank(state, _deps(fixture_db, handler=handler))
+    assert calls["n"] == 0                              # LLM never invoked
+    assert state.budget.llm_calls == 0
+    assert {r.company.id for r in state.results} == {1, 2, 3, 4}
+    assert all(r.match.full_match for r in state.results)
+    # location + industry, no capability -> 2/2 for every row
+    assert all((r.match.mandatory_met, r.match.mandatory_total) == (2, 2) for r in state.ranked)
+    assert state.trace.stages[-1].note == "purely structural — LLM validation skipped"
+
+
+def test_keyword_exclusion_query_still_skips_llm(fixture_db):
+    """S3 shape: exclusion is a keyword (deterministic), no capability -> still skip."""
+    state = _state()
+    state.criteria = MandateCriteria(
+        mandatory=MandateConstraints(countries=["Germany"], industries=["Energy"]),
+        exclusions=MandateExclusions(keywords=["smart grid"]),
+    )
+    state = build_search_plan(state, _deps(fixture_db))
+    state = retrieve(state, _deps(fixture_db))
+    assert 8 not in {c.id for c in state.pool}          # Berlin GridSense excluded
+    state = validate_and_rank(state, _deps(fixture_db))  # must not need the LLM
+    assert state.budget.llm_calls == 0
+    assert 9 in {r.company.id for r in state.results}    # Hamburg Volt kept
+
+
+def test_semantic_exclusion_category_still_uses_llm(fixture_db):
+    state = _fraud_state(fixture_db)
+    state.plan.serves = []
+    # a semantic category the model must judge -> do NOT skip
+    state.criteria.exclusions = MandateExclusions(categories=["consumer lending apps"])
+    batch = ValidationBatch(judgements=[
+        CandidateJudgement(candidate_id=1,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
+    ])
+    state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
+    assert state.budget.llm_calls == 1
+
+
+def test_serves_counts_toward_mandatory_total_but_is_usually_unmet(fixture_db):
     state = _fraud_state(fixture_db)
     state.plan.serves = ["European banks"]
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, relevance_score=0.5,
+        CandidateJudgement(candidate_id=1,
                            capability_findings=[_cap("fraud detection", quote="fraud detection")],
                            serves_findings=[TextFinding(requirement="European banks",
                                                         supported=False, note="not stated")]),
+        CandidateJudgement(candidate_id=3,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
-    assert [r.company.id for r in state.results] == [1]
-    assert state.results[0].verdict == "partial"
+    r = next(x for x in state.ranked if x.company.id == 1)
+    # serves now counts: location + industry + capability + serves = 4 total, 3 met
+    assert (r.match.mandatory_met, r.match.mandatory_total) == (3, 4)
+    assert not r.match.full_match
+    assert any("serves: European banks" in i.claim for i in r.inferences)
+    state.feasibility = None
+    state = compose_response(state, _deps(fixture_db))
+    assert any("customer / market" in c for c in state.response.metadata.caveats)
+
+
+def test_serves_grounded_quote_counts_as_met(fixture_db):
+    state = _fraud_state(fixture_db)
+    state.plan.serves = ["banks"]
+    batch = ValidationBatch(judgements=[
+        CandidateJudgement(candidate_id=1,
+            capability_findings=[_cap("fraud detection", quote="fraud detection")],
+            # "fraud detection" is a real substring of company 1's description
+            serves_findings=[TextFinding(requirement="banks", supported=True,
+                                         source_field="description", quote="fraud detection")]),
+    ])
+    state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
+    r = next(x for x in state.ranked if x.company.id == 1)
+    assert (r.match.mandatory_met, r.match.mandatory_total) == (4, 4)
+    assert r.match.full_match
 
 
 def test_validate_drops_candidate_with_no_capability_support(fixture_db):
     state = _fraud_state(fixture_db)
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, relevance_score=0.5,
+        CandidateJudgement(candidate_id=1,
+                           capability_findings=[_cap("fraud detection", supported=False)]),
+        CandidateJudgement(candidate_id=3,
                            capability_findings=[_cap("fraud detection", supported=False)]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
@@ -281,15 +421,20 @@ def test_compose_with_results_builds_result_items(fixture_db):
     state = _fraud_state(fixture_db)
     state.plan.preferences = MandateConstraints(founded_year_gte=2020)  # id 1 founded 2019
     batch = ValidationBatch(judgements=[
-        CandidateJudgement(candidate_id=1, relevance_score=0.9,
+        CandidateJudgement(candidate_id=1,
+                           capability_findings=[_cap("fraud detection", quote="fraud detection")]),
+        CandidateJudgement(candidate_id=3,
                            capability_findings=[_cap("fraud detection", quote="fraud detection")]),
     ])
     state = validate_and_rank(state, _deps(fixture_db, responses={ValidationBatch: batch}))
     state.feasibility = None
     state = compose_response(state, _deps(fixture_db))
-    item = state.response.results[0]
-    assert item.rank == 1 and item.company_id == 1
+    item = next(x for x in state.response.results if x.company_id == 1)
     assert item.name == "Helsinki Fraud Labs"
     assert item.evidence[0].quote == "fraud detection"
+    assert (item.mandatory_met, item.mandatory_total) == (3, 3)   # location + industry + capability
+    assert (item.preferences_met, item.preferences_total) == (0, 1)
     assert item.unmet_preferences == ["founded before 2020"]
+    assert item.llm_validated is True
     assert state.response.metadata.stages_executed[-1] == "compose_response"
+    assert state.response.metadata.match_summary.returned == len(state.response.results)

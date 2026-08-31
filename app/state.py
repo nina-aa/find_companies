@@ -6,7 +6,8 @@ Two kinds of model live here:
 * **LLM response schemas** — ``MandateCriteria`` (interpret) and ``ValidationBatch``
   (validate). Narrow, purpose-built, no open ``dict`` fields, safe for OpenAI
   strict ``response_format``. ``ValidationBatch`` deliberately carries *no* company
-  fields — those are hydrated from the DB afterwards (lesson 3 / lesson 9).
+  fields — those are hydrated from the DB afterwards, so the model never supplies
+  a record fact.
 * **Internal state / transport** — everything else. Never sent to the model.
 """
 
@@ -116,18 +117,10 @@ class TextFinding(BaseModel):
     note: str = ""            # reasoning, esp. when supported is false or unquotable
 
 
-class PreferenceSignal(BaseModel):
-    preference: str
-    matched: bool
-    note: str = ""
-
-
 class CandidateJudgement(BaseModel):
     candidate_id: int
     capability_findings: list[TextFinding] = Field(default_factory=list)
     serves_findings: list[TextFinding] = Field(default_factory=list)
-    preference_signals: list[PreferenceSignal] = Field(default_factory=list)
-    relevance_score: float = 0.0
     rationale: str = ""
 
 
@@ -149,12 +142,28 @@ class Inference(BaseModel):
     basis: str
 
 
+class MatchScore(BaseModel):
+    """How a company scores against the mandate. The ranking is a *tiered* sort on
+    these fields, in order: all mandatory met → # mandatory met → # preferences met
+    → keyword strength. `score` is a 0.6/0.3/0.1 weighted readout of the same
+    parts — shown for convenience, not used as the sort key."""
+
+    mandatory_met: int = 0
+    mandatory_total: int = 0            # text requirements only (structural = the SQL gate)
+    preferences_met: int = 0
+    preferences_total: int = 0
+    keyword_score: float | None = None  # min-max normalised bm25 in [0,1]; None if no topic
+    score: float = 0.0
+    llm_validated: bool = False         # were the text requirements checked by the model?
+
+    @property
+    def full_match(self) -> bool:
+        return self.mandatory_met >= self.mandatory_total
+
+
 class RankedCompany(BaseModel):
     company: Company
-    verdict: Verdict
-    relevance_score: float
-    preference_score: float = 0.0     # deterministic fit to structured preferences
-    mandatory_met: int = 0
+    match: MatchScore
     evidence: list[Evidence] = Field(default_factory=list)
     inferences: list[Inference] = Field(default_factory=list)
     unmet_preferences: list[str] = Field(default_factory=list)
@@ -231,10 +240,23 @@ class BudgetState(BaseModel):
     max_revisions: int = 1
     max_pool: int = 100
     max_validation_batch: int = 10
-    max_results: int = 10
+    max_results: int = 50
     llm_calls: int = 0
     iterations: int = 0
     revisions: int = 0
+
+
+class MatchSummary(BaseModel):
+    """Counts over the *whole* matched set, not just the returned slice."""
+
+    matched_filters: int = 0            # pass the structured + topic filters
+    matched_all_preferences: int = 0    # of those, also meet every preference (SQL count)
+    matched_some_preferences: int = 0   # meet requirements, miss >= 1 preference
+    sent_to_validation: int = 0         # top slice handed to the LLM
+    validated_full: int = 0             # LLM confirmed every text requirement
+    validated_gap: int = 0             # keyword-matched, a text/serves requirement unconfirmed
+    returned: int = 0
+    results_are_top_ranked: bool = True  # False -> every returned row ties; slice is arbitrary
 
 
 class ResponseMetadata(BaseModel):
@@ -247,6 +269,9 @@ class ResponseMetadata(BaseModel):
     funnel: Funnel = Field(default_factory=Funnel)
     validation_outcome: dict = Field(default_factory=dict)
     revised_search_performed: bool = False
+    ranking_note: str = ""
+    caveats: list[str] = Field(default_factory=list)
+    match_summary: MatchSummary = Field(default_factory=MatchSummary)
     llm_calls: int = 0
     llm_attempts: int = 0
     prompt_tokens: int = 0
@@ -270,9 +295,13 @@ class ResultItem(BaseModel):
     founded_year: int | None
     employee_count: int | None
     revenue_range: str | None
-    verdict: Verdict
-    relevance_score: float
-    preference_score: float = 1.0
+    mandatory_met: int
+    mandatory_total: int
+    preferences_met: int
+    preferences_total: int
+    keyword_score: float | None = None
+    score: float = 0.0
+    llm_validated: bool = False
     evidence: list[Evidence] = Field(default_factory=list)
     inferences: list[Inference] = Field(default_factory=list)
     unmet_preferences: list[str] = Field(default_factory=list)
@@ -285,6 +314,7 @@ class AgentResponse(BaseModel):
     search_plan: SearchPlan
     results: list[ResultItem] = Field(default_factory=list)
     revision: RevisionRecord = Field(default_factory=RevisionRecord)
+    ambiguities: list[str] = Field(default_factory=list)   # mirror of the parse's ambiguities, surfaced
     empty_reason: str = ""
     metadata: ResponseMetadata = Field(default_factory=ResponseMetadata)
 
@@ -299,8 +329,8 @@ class RunConfig(BaseModel):
     min_results: int = 3
     deadline_s: float = 90.0
     enable_embeddings: bool = False
-    validation_batch: int = 10
-    result_limit: int = 10
+    validation_batch: int = 10        # how many candidates the LLM judges (cost bound)
+    result_limit: int = 10            # how many results to return (may exceed the batch)
     pool_limit: int = 100
     engine: Literal["driver", "graph"] = "driver"
 
@@ -334,6 +364,9 @@ class RunState(BaseModel):
 
     stop_reason: str = ""          # "" = ran to completion; else deadline/budget/degraded:<kind>
     timed_out: bool = False
+    ranking_note: str = ""         # set when the returned slice is an arbitrary tie
+    results_are_top_ranked: bool = True
+    matched_all_preferences: int = 0
 
     def ensure_trace(self) -> RunTrace:
         if self.trace is None:

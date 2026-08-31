@@ -46,6 +46,10 @@ phrases:
   "molecular analysis":   { industry: Biotech,    topics: ["molecular analysis"] }
   "precision medicine":   { industry: Biotech,    topics: ["drug discovery", "molecular analysis"] }
   "personalized medicine": { industry: Biotech,   topics: ["drug discovery", "molecular analysis"] }
+  "cancer":               { industry: Biotech,    topics: ["drug discovery", "molecular analysis"] }
+  "cancer research":      { industry: Biotech,    topics: ["drug discovery", "molecular analysis"] }
+  "oncology":             { industry: Biotech,    topics: ["drug discovery", "molecular analysis"] }
+  "immunotherapy":        { industry: Biotech,    topics: ["drug discovery", "molecular analysis"] }
 
   # --- Healthcare ---
   "healthcare":           { industry: Healthcare, topics: [] }

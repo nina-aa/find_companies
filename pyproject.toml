@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "compara-company-search"
 version = "0.1.0"
-description = "Agentic company-search system (Comparables.ai technical assessment)"
+description = "Agentic company-search system — NL mandate to a ranked, evidence-backed shortlist"
 requires-python = ">=3.11"
 dependencies = [
     "PyYAML>=6.0",

@@ -88,10 +88,9 @@ def _step(fn, name, state, deps, guard, log):
 
 
 def _enough(state: RunState) -> bool:
-    """Enough *usable* results to skip revision: full matches, plus partials (on
-    this dataset a thin description often caps a genuine fit at 'partial')."""
-    usable = sum(1 for r in state.ranked if r.verdict in ("match", "partial"))
-    return usable >= state.cfg.min_results
+    """Enough usable results to skip revision. Every company in `ranked` cleared
+    the capability gate; a text/serves gap doesn't disqualify it here."""
+    return len(state.ranked) >= state.cfg.min_results
 
 
 def _run_driver(state: RunState, deps: NodeDeps, guard: BudgetGuard, log) -> None:

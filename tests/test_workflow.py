@@ -1,5 +1,5 @@
 """run_workflow end to end on both engines: happy path, abstention, revision,
-and — the point of M4 — the budget bounds actually holding."""
+and the budget bounds actually holding under pressure."""
 
 import time
 
@@ -43,7 +43,7 @@ def _finnish_fraud():
 
 def _match(cid):
     return CandidateJudgement(
-        candidate_id=cid, relevance_score=0.9,
+        candidate_id=cid,
         capability_findings=[TextFinding(requirement="fraud detection", supported=True,
                                          source_field="description", quote="fraud detection")],
     )
@@ -58,7 +58,9 @@ def test_happy_path(engine, fixture_db):
         RunConfig(provider="fake", engine=engine, min_results=1),
         db_path=fixture_db, llm_client=client,
     )
-    assert [r.company_id for r in resp.results] == [1, 3]
+    # both fixture rows match "fraud detection"; exact intra-tier order is bm25-driven
+    assert {r.company_id for r in resp.results} == {1, 3}
+    assert all(r.mandatory_met == r.mandatory_total for r in resp.results)
     assert resp.metadata.llm_calls == 2                 # interpret + one validate
     assert resp.metadata.stages_executed[-1] == "compose_response"
     assert "relax_preferences" not in resp.metadata.stages_executed

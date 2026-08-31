@@ -1,8 +1,8 @@
-"""Pydantic contracts for the retrieval tools (C2).
+"""Pydantic contracts for the retrieval tools.
 
 Every tool has an explicit input and output model. These are *storage / transport*
-models — the narrow schemas the LLM is asked to produce live separately (C3), so
-that an internal model is never reused as an LLM response schema.
+models — the narrow schemas the LLM is asked to produce live in ``app/state.py``,
+so that an internal model is never reused as an LLM response schema.
 """
 
 from __future__ import annotations
@@ -12,14 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from app import config
 from app.revenue import RevenueRange, buckets_matching
 
-# Hard ceilings — enforced here as well as by BudgetGuard (C5).
+# Hard ceiling on a retrieval result set — enforced here as well as by BudgetGuard.
 MAX_LIMIT = 100
 
 
 class Exclusions(BaseModel):
     """Negative constraints. ``industries`` is a structured gate; ``keywords`` is a
     deterministic substring gate over name + description. Semantic exclusion (a
-    category the text only implies) is left to the validator (C4)."""
+    category the text only implies) is left to ``validate_and_rank``."""
 
     model_config = ConfigDict(frozen=True)
 
